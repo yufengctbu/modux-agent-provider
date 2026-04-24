@@ -1,6 +1,6 @@
 import * as vscode from 'vscode'
-import { registerAgent } from './agent/index'
-import { initLogger, log } from './logger'
+import { registerAgent } from './provider/index'
+import { initLogger, log } from './shared/logger'
 
 /**
  * 扩展激活入口
