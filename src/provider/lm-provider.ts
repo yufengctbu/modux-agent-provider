@@ -89,9 +89,7 @@ export class ModuxModelProvider implements vscode.LanguageModelChatProvider {
     token: vscode.CancellationToken,
   ): Promise<void> {
     const { enabled, url } = config.backend
-    log(
-      `[LM Provider] 请求：model=${model.id}，messages=${messages.length}，后端转发=${enabled}`,
-    )
+    log(`[LM Provider] 请求：model=${model.id}，messages=${messages.length}，后端转发=${enabled}`)
 
     if (!enabled) {
       progress.report(
@@ -141,7 +139,7 @@ export class ModuxModelProvider implements vscode.LanguageModelChatProvider {
     const body: BackendRequestBody = {
       messages: messages.map((m) => ({
         role: m.role === vscode.LanguageModelChatMessageRole.User ? 'user' : 'assistant',
-        content: serializeMessageContent(m.content),
+        content: serializeMessageContent(m.content as vscode.LanguageModelInputPart[]),
       })),
     }
 
@@ -218,8 +216,7 @@ export class ModuxModelProvider implements vscode.LanguageModelChatProvider {
           try {
             const chunk = JSON.parse(data) as SseDelta
             // 兼容两种格式
-            const content =
-              chunk.content ?? chunk.choices?.[0]?.delta?.content
+            const content = chunk.content ?? chunk.choices?.[0]?.delta?.content
             if (content) {
               progress.report(new vscode.LanguageModelTextPart(content))
             }
@@ -263,17 +260,14 @@ export class ModuxModelProvider implements vscode.LanguageModelChatProvider {
  *   - LanguageModelToolResultPart → "[Tool Result: content]" 占位符
  *   - 其他类型                 → 忽略（对应 Claude Code serializeContent 的 default 分支）
  */
-function serializeMessageContent(
-  content: readonly vscode.LanguageModelChatMessageContentPart[],
-): string {
+function serializeMessageContent(content: readonly vscode.LanguageModelInputPart[]): string {
   const parts: string[] = []
 
   for (const part of content) {
     if (part instanceof vscode.LanguageModelTextPart) {
       parts.push(part.value)
     } else if (part instanceof vscode.LanguageModelToolCallPart) {
-      const inputStr =
-        typeof part.input === 'string' ? part.input : JSON.stringify(part.input)
+      const inputStr = typeof part.input === 'string' ? part.input : JSON.stringify(part.input)
       parts.push(`[Tool Call: ${part.name}(${inputStr})]`)
     } else if (part instanceof vscode.LanguageModelToolResultPart) {
       const resultText = part.content

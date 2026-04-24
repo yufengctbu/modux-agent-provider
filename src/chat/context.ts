@@ -147,7 +147,7 @@ export class ContextBuilder {
     const lastMsg = this.messages[this.messages.length - 1]
     if (lastMsg.role !== vscode.LanguageModelChatMessageRole.Assistant) return
 
-    const orphanCalls = (lastMsg.content as vscode.LanguageModelChatMessageContentPart[]).filter(
+    const orphanCalls = (lastMsg.content as vscode.LanguageModelInputPart[]).filter(
       (p): p is vscode.LanguageModelToolCallPart => p instanceof vscode.LanguageModelToolCallPart,
     )
     if (orphanCalls.length === 0) return

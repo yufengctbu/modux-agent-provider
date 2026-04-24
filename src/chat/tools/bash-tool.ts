@@ -1,4 +1,5 @@
-import { exec } from 'child_process'
+import { exec } from 'node:child_process'
+import * as path from 'node:path'
 import * as vscode from 'vscode'
 import { config } from '../../config'
 import type { ModuxTool } from './types'
@@ -55,9 +56,7 @@ export const runCommandTool: ModuxTool = {
       return '执行失败：未找到工作区，请先打开一个文件夹。'
     }
     const workspaceRoot = folders[0].uri.fsPath
-    const execCwd = relativeCwd
-      ? require('path').resolve(workspaceRoot, relativeCwd)
-      : workspaceRoot
+    const execCwd = relativeCwd ? path.resolve(workspaceRoot, relativeCwd) : workspaceRoot
 
     const timeoutMs =
       (config.tools as Record<string, { enabled: boolean; timeoutMs?: number }>).runCommand

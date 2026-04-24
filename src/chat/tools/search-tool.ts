@@ -1,13 +1,19 @@
+import * as fs from 'node:fs/promises'
 import * as vscode from 'vscode'
 import type { ModuxTool } from './types'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 工具区域：代码搜索
-//   - search_code  基于 vscode.workspace.findTextInFiles()，无需启动 shell 进程
+//   - search_code  基于 vscode.workspace.findFiles + 手动正则搜索
 //
 // 设计来源：Claude Code GrepTool（ripgrep）+ GlobTool
 // 核心价值：read_file/list_dir 只能处理"已知路径"，search_code 支持从代码片段
 //           出发定位相关文件，是"先搜索再精读"工作流的基础。
+//
+// 为什么不用 vscode.workspace.findTextInFiles：
+//   该 API 在 @types/vscode ^1.100 已移除，改为 proposed API，不适合稳定扩展使用。
+//   当前方案：findFiles（glob 匹配）+ fs.readFile（内容读取）+ RegExp（搜索），
+//   行为与 ripgrep 完全对等，且不依赖任何 proposed API。
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── 常量 ──────────────────────────────────────────────────────────────────────
@@ -16,13 +22,16 @@ import type { ModuxTool } from './types'
 const MAX_FILES_WITH_MATCHES = 50
 
 /** content 模式的最大结果字符数 */
-const CONTENT_MODE_MAX_CHARS = 8000
+const CONTENT_MODE_MAX_CHARS = 8_000
 
 /** content 模式每个匹配项展示的前后上下文行数 */
 const CONTENT_CONTEXT_LINES = 2
 
-/** 搜索时排除的目录（glob 模式） */
+/** 搜索时排除的目录（glob 模式，传给 findFiles 的 exclude 参数） */
 const EXCLUDE_GLOB = '**/{node_modules,dist,.git,out}/**'
+
+/** findFiles 最大文件数（避免在超大工作区扫描过多文件） */
+const MAX_FILES_TO_SCAN = 500
 
 // ── 类型定义 ──────────────────────────────────────────────────────────────────
 
@@ -38,10 +47,28 @@ type SearchOutputMode = 'files_with_matches' | 'content' | 'count'
 interface SearchCodeInput {
   /** 搜索 pattern，支持完整 JS RegExp 语法 */
   pattern: string
-  /** 文件过滤 glob，如 "**\/*.ts"、"src/**"（可选） */
+  /** 文件过滤 glob，如 "**\/*.ts"、"src/**"（可选，默认搜所有文件） */
   glob?: string
   /** 输出模式（默认 files_with_matches） */
   outputMode?: SearchOutputMode
+}
+
+/** 单个文件的搜索结果 */
+interface FileMatch {
+  /** 文件绝对路径 */
+  filePath: string
+  /** 匹配行信息 */
+  lines: LineMatch[]
+}
+
+/** 单行匹配结果 */
+interface LineMatch {
+  /** 1-based 行号 */
+  lineNumber: number
+  /** 该行文本内容 */
+  text: string
+  /** 上下文行（lineNumber ± CONTENT_CONTEXT_LINES），仅 content 模式填充 */
+  context?: string[]
 }
 
 // ── search_code ───────────────────────────────────────────────────────────────
@@ -80,57 +107,91 @@ export const searchCodeTool: ModuxTool = {
   async execute(input: unknown, token: vscode.CancellationToken): Promise<string> {
     const { pattern, glob, outputMode = 'files_with_matches' } = input as SearchCodeInput
 
-    // 将用户 pattern 转为 VS Code findTextInFiles 所需的 RegExp
+    // 编译正则（全局标志确保每行可以重复匹配）
     let regex: RegExp
     try {
-      regex = new RegExp(pattern)
+      regex = new RegExp(pattern, 'g')
     } catch {
       return `搜索失败：无效的正则表达式 "${pattern}"。`
     }
 
-    // 收集所有匹配结果
-    const matchesByFile = new Map<string, vscode.TextSearchMatch[]>()
+    // ── 第 1 步：用 findFiles 获取候选文件列表 ────────────────────────────────
+    const includePattern = glob ?? '**/*'
+    const uris = await vscode.workspace.findFiles(
+      includePattern,
+      EXCLUDE_GLOB,
+      MAX_FILES_TO_SCAN,
+      token,
+    )
 
-    try {
-      await vscode.workspace.findTextInFiles(
-        { pattern, isRegExp: true },
-        {
-          include: glob,
-          exclude: EXCLUDE_GLOB,
-          maxResults: outputMode === 'files_with_matches' ? MAX_FILES_WITH_MATCHES * 3 : 500,
-        },
-        (result) => {
-          if (token.isCancellationRequested) return
-          if (!('ranges' in result)) return // 跳过 URI-only 结果
-          const uri = result.uri.fsPath
-          const existing = matchesByFile.get(uri) ?? []
-          existing.push(result as vscode.TextSearchMatch)
-          matchesByFile.set(uri, existing)
-        },
-        token,
-      )
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      return `搜索失败：${msg}`
+    if (uris.length === 0) {
+      return `未找到符合 glob "${includePattern}" 的文件。`
     }
 
-    if (matchesByFile.size === 0) {
+    // ── 第 2 步：逐文件读取并搜索 ──────────────────────────────────────────────
+    const fileMatches: FileMatch[] = []
+    const needContext = outputMode === 'content'
+
+    for (const uri of uris) {
+      if (token.isCancellationRequested) break
+      // 跳过二进制文件常见扩展（避免解码乱码）
+      if (isBinaryExtension(uri.fsPath)) continue
+
+      let content: string
+      try {
+        content = await fs.readFile(uri.fsPath, 'utf-8')
+      } catch {
+        continue // 无权读取或读取失败，跳过
+      }
+
+      const lines = content.split('\n')
+      const matchedLines: LineMatch[] = []
+
+      for (let i = 0; i < lines.length; i++) {
+        // 每次测试前重置 lastIndex（全局 regex 有状态）
+        regex.lastIndex = 0
+        if (!regex.test(lines[i])) continue
+
+        const lineMatch: LineMatch = {
+          lineNumber: i + 1, // 转为 1-based
+          text: lines[i],
+        }
+
+        if (needContext) {
+          // 提取前后 N 行上下文
+          const start = Math.max(0, i - CONTENT_CONTEXT_LINES)
+          const end = Math.min(lines.length - 1, i + CONTENT_CONTEXT_LINES)
+          const contextLines: string[] = []
+          for (let j = start; j <= end; j++) {
+            if (j !== i) contextLines.push(`${j + 1}: ${lines[j]}`)
+          }
+          lineMatch.context = contextLines
+        }
+
+        matchedLines.push(lineMatch)
+      }
+
+      if (matchedLines.length > 0) {
+        fileMatches.push({ filePath: uri.fsPath, lines: matchedLines })
+      }
+    }
+
+    if (fileMatches.length === 0) {
       return `未找到匹配 "${pattern}" 的内容${glob ? `（限定范围：${glob}）` : ''}。`
     }
 
-    // ── 按输出模式格式化结果 ──────────────────────────────────────────────────
+    // ── 第 3 步：按输出模式格式化结果 ────────────────────────────────────────
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? ''
+
     switch (outputMode) {
       case 'files_with_matches':
-        return formatFilesWithMatches(matchesByFile)
-
+        return formatFilesWithMatches(fileMatches, root)
       case 'count':
-        return formatCountMode(matchesByFile)
-
+        return formatCountMode(fileMatches, root)
       case 'content':
-        return formatContentMode(matchesByFile, regex)
-
+        return formatContentMode(fileMatches, root)
       default:
-        return formatFilesWithMatches(matchesByFile)
+        return formatFilesWithMatches(fileMatches, root)
     }
   },
 }
@@ -138,16 +199,13 @@ export const searchCodeTool: ModuxTool = {
 // ── 格式化函数 ────────────────────────────────────────────────────────────────
 
 /** 仅输出文件路径列表（files_with_matches 模式） */
-function formatFilesWithMatches(matchesByFile: Map<string, vscode.TextSearchMatch[]>): string {
-  const folders = vscode.workspace.workspaceFolders
-  const root = folders?.[0]?.uri.fsPath ?? ''
-
-  const files = [...matchesByFile.keys()]
+function formatFilesWithMatches(fileMatches: FileMatch[], root: string): string {
+  const files = fileMatches
     .slice(0, MAX_FILES_WITH_MATCHES)
-    .map((abs) => (root && abs.startsWith(root) ? abs.slice(root.length + 1) : abs))
+    .map(({ filePath }) => toRelPath(filePath, root))
     .sort()
 
-  const total = matchesByFile.size
+  const total = fileMatches.length
   const suffix =
     total > MAX_FILES_WITH_MATCHES
       ? `\n（仅显示前 ${MAX_FILES_WITH_MATCHES} 个文件，共 ${total} 个）`
@@ -156,48 +214,34 @@ function formatFilesWithMatches(matchesByFile: Map<string, vscode.TextSearchMatc
 }
 
 /** 输出各文件匹配计数（count 模式） */
-function formatCountMode(matchesByFile: Map<string, vscode.TextSearchMatch[]>): string {
-  const folders = vscode.workspace.workspaceFolders
-  const root = folders?.[0]?.uri.fsPath ?? ''
-
-  const lines = [...matchesByFile.entries()]
-    .map(([abs, matches]) => {
-      const rel = root && abs.startsWith(root) ? abs.slice(root.length + 1) : abs
+function formatCountMode(fileMatches: FileMatch[], root: string): string {
+  const lines = fileMatches
+    .map(({ filePath, lines: matches }) => {
+      const rel = toRelPath(filePath, root)
       return `${matches.length.toString().padStart(4)}  ${rel}`
     })
-    .sort((a, b) => b.localeCompare(a)) // 按文件名排序
+    .sort((a, b) => b.localeCompare(a))
 
-  const totalCount = [...matchesByFile.values()].reduce((sum, m) => sum + m.length, 0)
-  return `匹配数量（${matchesByFile.size} 个文件，共 ${totalCount} 处）：\n${lines.join('\n')}`
+  const totalCount = fileMatches.reduce((sum, { lines }) => sum + lines.length, 0)
+  return `匹配数量（${fileMatches.length} 个文件，共 ${totalCount} 处）：\n${lines.join('\n')}`
 }
 
 /** 输出匹配行及上下文（content 模式） */
-function formatContentMode(
-  matchesByFile: Map<string, vscode.TextSearchMatch[]>,
-  _regex: RegExp,
-): string {
-  const folders = vscode.workspace.workspaceFolders
-  const root = folders?.[0]?.uri.fsPath ?? ''
-
+function formatContentMode(fileMatches: FileMatch[], root: string): string {
   const parts: string[] = []
   let totalChars = 0
 
-  for (const [abs, matches] of matchesByFile) {
+  for (const { filePath, lines: matches } of fileMatches) {
     if (totalChars >= CONTENT_MODE_MAX_CHARS) break
 
-    const rel = root && abs.startsWith(root) ? abs.slice(root.length + 1) : abs
+    const rel = toRelPath(filePath, root)
     const fileParts: string[] = [`── ${rel} ──`]
 
     for (const match of matches) {
-      if (!('ranges' in match)) continue
-
-      // VS Code TextSearchMatch 的 preview.text 包含匹配行文本
-      const lineNum = Array.isArray(match.ranges)
-        ? (match.ranges[0] as vscode.Range).start.line + 1
-        : (match.ranges as vscode.Range).start.line + 1
-
-      const previewText = match.preview.text.trimEnd()
-      fileParts.push(`  L${lineNum}: ${previewText}`)
+      fileParts.push(`  L${match.lineNumber}: ${match.text.trimEnd()}`)
+      if (match.context) {
+        for (const ctx of match.context) fileParts.push(`    ${ctx}`)
+      }
     }
 
     const block = fileParts.join('\n')
@@ -211,4 +255,51 @@ function formatContentMode(
       : ''
 
   return parts.join('\n\n') + suffix
+}
+
+// ── 工具函数 ──────────────────────────────────────────────────────────────────
+
+/** 将绝对路径转换为相对于工作区根目录的相对路径 */
+function toRelPath(absPath: string, root: string): string {
+  return root && absPath.startsWith(root + '/') ? absPath.slice(root.length + 1) : absPath
+}
+
+/** 常见二进制文件扩展名集合（跳过这些文件以避免 UTF-8 解码乱码） */
+const BINARY_EXTENSIONS = new Set([
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.ico',
+  '.svg',
+  '.woff',
+  '.woff2',
+  '.ttf',
+  '.eot',
+  '.otf',
+  '.zip',
+  '.gz',
+  '.tar',
+  '.tgz',
+  '.bz2',
+  '.7z',
+  '.rar',
+  '.pdf',
+  '.doc',
+  '.docx',
+  '.xls',
+  '.xlsx',
+  '.exe',
+  '.dll',
+  '.so',
+  '.dylib',
+  '.node',
+  '.map',
+  '.min.js',
+])
+
+function isBinaryExtension(filePath: string): boolean {
+  const lower = filePath.toLowerCase()
+  return [...BINARY_EXTENSIONS].some((ext) => lower.endsWith(ext))
 }

@@ -1,7 +1,7 @@
-import * as fs from 'fs/promises'
-import * as path from 'path'
-import { execFile } from 'child_process'
-import { promisify } from 'util'
+import * as fs from 'node:fs/promises'
+import * as path from 'node:path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import * as vscode from 'vscode'
 import { log } from '../shared/logger'
 
