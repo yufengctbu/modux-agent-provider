@@ -1,0 +1,32 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "watch",
+      "type": "npm",
+      "script": "dev",
+      // isBackground=true 表示这是一个持续运行的后台任务
+      // VS Code 通过 problemMatcher.background 的模式来判断"首次构建完成"
+      // 从而决定何时启动扩展开发宿主，而不是永久等待
+      "isBackground": true,
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": {
+        "owner": "vite",
+        // 不匹配任何错误行（错误由 TypeScript 语言服务自行处理）
+        "pattern": {
+          "regexp": "^$"
+        },
+        "background": {
+          "activeOnStart": true,
+          // Vite 开始构建时的输出特征
+          "beginsPattern": "building for production",
+          // Vite 构建完成时的输出特征，匹配后 VS Code 才会启动宿主窗口
+          "endsPattern": "✓ built in"
+        }
+      }
+    }
+  ]
+}

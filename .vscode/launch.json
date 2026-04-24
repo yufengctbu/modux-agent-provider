@@ -1,0 +1,16 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // F5 启动：先触发 watch 任务完成首次构建，再启动扩展开发宿主
+      "name": "Run Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
+      // 告知调试器去 dist/ 目录寻找 source map，实现 TS 源码级断点
+      "outFiles": ["${workspaceFolder}/dist/**/*.cjs"],
+      "sourceMaps": true,
+      "preLaunchTask": "watch"
+    }
+  ]
+}

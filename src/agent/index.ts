@@ -1,6 +1,7 @@
 import * as vscode from 'vscode'
 import { AGENT_ID } from '../types'
 import { handleChatRequest } from './handler'
+import { log } from '../logger'
 
 /**
  * 注册 modux-agent Chat Participant
@@ -13,4 +14,6 @@ export function registerAgent(context: vscode.ExtensionContext): void {
 
   // 将参与者推入订阅列表，扩展停用时自动 dispose
   context.subscriptions.push(participant)
+
+  log(`Chat Participant 已注册：${AGENT_ID}`)
 }
