@@ -6,6 +6,10 @@
   "publisher": "modux",
   "license": "MIT",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/modux/modux-agent-provider.git"
+  },
   "engines": {
     "vscode": "^1.95.0"
   },
