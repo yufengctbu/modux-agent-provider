@@ -127,19 +127,66 @@ code --install-extension modux-agent-provider-0.0.1.vsix
 ```
 modux-agent-provider/
 ├── src/
-│   ├── extension.ts        # 扩展激活/注销入口
-│   ├── types.ts            # 公共常量与类型
-│   └── agent/
-│       ├── index.ts        # 注册 Chat Participant
-│       └── handler.ts      # 处理用户消息，调用 LLM 并流式响应
-├── package.json            # VS Code 扩展清单 + npm 配置
-├── vite.config.ts          # Vite 构建配置（输出 CJS）
-├── tsconfig.json           # TypeScript 配置
-├── eslint.config.mjs       # ESLint 规则
-├── .prettierrc             # Prettier 格式化规则
-├── PLAN.md                 # 项目设计方案
-└── README.md               # 本文件
+│   ├── extension.ts                  # 扩展激活/注销入口，协调初始化
+│   │
+│   ├── provider/
+│   │   └── index.ts                  # 【Provider 层】向 Copilot 注册 Chat Participant
+│   │
+│   ├── chat/
+│   │   ├── handler.ts                # 【Chat 层·入口】解包 vscode 请求，启动 Agent Loop
+│   │   ├── loop.ts                   # 【Chat 层·核心】Agent 循环引擎（多轮推理 + 工具调用）
+│   │   ├── context.ts                # 【Chat 层·上下文】ContextBuilder，维护多轮消息历史
+│   │   └── tools/
+│   │       └── registry.ts           # 【Chat 层·工具】工具声明列表 + 执行器
+│   │
+│   ├── llm/
+│   │   └── client.ts                 # 【LLM 层】选取模型，发送请求，返回响应流
+│   │
+│   └── shared/
+│       ├── constants.ts              # 跨层公共常量（AGENT_ID、MAX_LOOP_ROUNDS）
+│       └── logger.ts                 # 日志工具（Output Channel）
+│
+├── .vscode/
+│   ├── launch.json                   # F5 调试启动配置
+│   ├── tasks.json                    # Vite watch 构建任务
+│   └── extensions.json               # 推荐安装的扩展
+│
+├── package.json                      # VS Code 扩展清单 + npm 配置
+├── vite.config.ts                    # Vite 构建配置（输出 CJS）
+├── tsconfig.json                     # TypeScript 配置
+├── eslint.config.mjs                 # ESLint 规则
+├── .prettierrc                       # Prettier 格式化规则
+├── .editorconfig                     # 编辑器格式规范
+├── .gitignore
+├── LICENSE
+├── PLAN.md                           # 项目设计方案
+└── README.md                         # 本文件
 ```
+
+### 分层依赖关系
+
+```
+extension
+    └── provider          （唯一接触 vscode.chat API）
+            └── chat/handler
+                    └── chat/loop
+                            ├── chat/context
+                            ├── chat/tools/registry
+                            └── llm/client    （唯一接触 vscode.lm API）
+                                    └── shared（constants / logger）
+```
+
+依赖方向单向向下，各层职责：
+
+| 层                       | 职责                                                     |
+| ------------------------ | -------------------------------------------------------- |
+| `provider/`              | 注册 Chat Participant，绑定 handler                      |
+| `chat/handler.ts`        | 解包 vscode 原始请求，启动 loop                          |
+| `chat/loop.ts`           | Agent 循环引擎：LLM 调用 → 解析 Part → 工具执行 → 下一轮 |
+| `chat/context.ts`        | 构建、追加多轮消息历史（含工具调用结果）                 |
+| `chat/tools/registry.ts` | 声明工具列表 + 工具执行分发，添加工具只改此文件          |
+| `llm/client.ts`          | 选取 Copilot 模型，`sendRequest` 封装                    |
+| `shared/`                | 跨层常量与日志，无业务依赖                               |
 
 ---
 
