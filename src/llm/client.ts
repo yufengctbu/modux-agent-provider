@@ -31,16 +31,18 @@ export async function selectModel(): Promise<vscode.LanguageModelChat | undefine
 }
 
 /**
- * 向指定模型发送消息并返回异步文本流
+ * 向指定模型发送消息，返回原始响应对象
  *
- * 此函数无感知 loop 的存在，只负责单次 LLM 调用。
- * 错误由调用方（loop）统一捕获处理。
+ * 返回 LanguageModelChatResponse 而非 .text，
+ * 使调用方可以同时处理文本片段（TextPart）和工具调用片段（ToolCallPart）。
+ *
+ * @param tools 本次请求中向 LLM 声明的可用工具列表，空数组表示纯文本对话
  */
-export async function requestStream(
+export async function sendChatRequest(
   model: vscode.LanguageModelChat,
   messages: vscode.LanguageModelChatMessage[],
+  tools: readonly vscode.LanguageModelChatTool[],
   token: vscode.CancellationToken,
-): Promise<AsyncIterable<string>> {
-  const response = await model.sendRequest(messages, {}, token)
-  return response.text
+): Promise<vscode.LanguageModelChatResponse> {
+  return await model.sendRequest(messages, { tools: [...tools] }, token)
 }

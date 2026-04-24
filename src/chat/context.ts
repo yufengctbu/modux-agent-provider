@@ -45,21 +45,46 @@ export class ContextBuilder {
 
   /**
    * 构建本轮完整消息列表（历史 + 当前用户输入）
+   * 用于 Loop 第 1 轮：在已有历史末尾追加本次用户输入
    */
   build(userPrompt: string): vscode.LanguageModelChatMessage[] {
     return [...this.messages, vscode.LanguageModelChatMessage.User(userPrompt)]
   }
 
   /**
-   * 将本轮 Assistant 回复追加进历史，供下一轮使用
+   * 获取当前消息列表（不追加用户输入）
+   * 用于 Loop 第 2+ 轮（工具调用轮次）：历史中已包含工具结果，无需重复追加用户 prompt
    */
-  appendAssistant(text: string): void {
-    this.messages.push(vscode.LanguageModelChatMessage.Assistant(text))
+  buildForContinuation(): vscode.LanguageModelChatMessage[] {
+    return [...this.messages]
   }
 
   /**
-   * 将工具执行结果作为用户观察追加进历史
-   * 格式：[Observation] <内容>，让 LLM 感知到行动结果
+   * 追加包含工具调用的 Assistant 消息
+   *
+   * 将本轮 LLM 输出的文本段和工具调用段一起写入上下文，
+   * 确保下一轮 LLM 能感知到「自己说了什么、调用了什么工具」。
+   */
+  appendAssistantWithToolCalls(
+    textParts: vscode.LanguageModelTextPart[],
+    toolCalls: vscode.LanguageModelToolCallPart[],
+  ): void {
+    this.messages.push(vscode.LanguageModelChatMessage.Assistant([...textParts, ...toolCalls]))
+  }
+
+  /**
+   * 追加工具执行结果（作为 User 角色的 ToolResultPart）
+   *
+   * VS Code LM API 规定工具结果以 User 消息的形式回传，
+   * 每个 ToolResultPart 通过 callId 与对应的 ToolCallPart 关联。
+   */
+  appendToolResults(results: vscode.LanguageModelToolResultPart[]): void {
+    this.messages.push(vscode.LanguageModelChatMessage.User(results))
+  }
+
+  /**
+   * 将工具执行结果作为用户观察追加进历史（纯文本格式）
+   * 适用于不支持结构化 ToolResultPart 的场景
    */
   appendObservation(observation: string): void {
     this.messages.push(vscode.LanguageModelChatMessage.User(`[Observation]\n${observation}`))

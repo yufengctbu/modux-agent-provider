@@ -1,6 +1,7 @@
 import * as vscode from 'vscode'
-import { selectModel, requestStream } from '../llm/client'
+import { selectModel, sendChatRequest } from '../llm/client'
 import { ContextBuilder } from './context'
+import { AVAILABLE_TOOLS, executeTool } from './tools/registry'
 import { log } from '../shared/logger'
 import { MAX_LOOP_ROUNDS } from '../shared/constants'
 
@@ -8,40 +9,21 @@ import { MAX_LOOP_ROUNDS } from '../shared/constants'
 const NO_MODEL_MESSAGE = '未找到可用的语言模型。请确保已安装并启用 GitHub Copilot 扩展。'
 
 /**
- * Agent Loop 的运行结果
- * isDone=true 时输出最终答案，isDone=false 时表示需要继续循环
- *
- * 扩展点：当需要接入工具调用（函数调用、代码执行等）时，
- * 在 isDone=false 的分支中补充 action 字段，由 loop 驱动执行。
- */
-interface LoopResult {
-  isDone: boolean
-  output: string
-}
-
-/**
- * 解析 LLM 单轮输出，判断任务是否已完成
- *
- * 当前实现：每轮视为完成（直接输出）。
- * 扩展点：可在此处解析 LLM 输出中的特定标记（如 <tool_call>、CONTINUE 等），
- * 将 isDone 设为 false 并填入 action，实现多轮工具调用。
- */
-function parseResponse(text: string): LoopResult {
-  return { isDone: true, output: text }
-}
-
-/**
  * Agent 核心循环
  *
- * 职责：
- * 1. 维护每轮循环的状态（轮次、上下文）
- * 2. 驱动 context → LLM → 解析 → （执行动作）→ 下一轮
- * 3. 将最终结果流式写入 stream
+ * 每轮流程：
+ *   1. 构建消息列表（第 1 轮含用户 prompt，后续轮次含工具结果）
+ *   2. 调用 LLM，按 Part 类型分流处理：
+ *      - LanguageModelTextPart     → 收集文本
+ *      - LanguageModelToolCallPart → 收集工具调用请求
+ *   3. 判断是否继续：
+ *      - 无工具调用 → 输出最终文本，结束
+ *      - 有工具调用 → 执行工具，追加结果到上下文，进入下一轮
  *
  * @param initialPrompt - 用户本轮输入的原始文本
  * @param history       - Copilot Chat 传入的历史上下文
- * @param stream        - 向 Chat 面板写入流式响应
- * @param token         - 取消令牌，用户点击停止时中断循环
+ * @param stream        - 向 Chat 面板写入响应
+ * @param token         - 取消令牌
  */
 export async function runAgentLoop(
   initialPrompt: string,
@@ -50,7 +32,6 @@ export async function runAgentLoop(
   token: vscode.CancellationToken,
 ): Promise<void> {
   const model = await selectModel()
-
   if (!model) {
     stream.markdown(NO_MODEL_MESSAGE)
     return
@@ -66,17 +47,22 @@ export async function runAgentLoop(
 
     log(`[Loop] 第 ${round} 轮开始`)
 
-    // 构建本轮完整消息列表（历史 + 当前 prompt）
-    const messages = contextBuilder.build(initialPrompt)
+    // 第 1 轮追加用户 prompt，后续轮次消息列表中已含工具结果，无需重复追加
+    const messages =
+      round === 1 ? contextBuilder.build(initialPrompt) : contextBuilder.buildForContinuation()
 
-    // 收集 LLM 完整输出，用于 parseResponse 判断是否完成
-    // 最终轮（isDone=true）同步流式输出，非最终轮（内部推理）不输出
-    let fullText = ''
-    let isDonePending = false
+    // ── 单次 LLM 调用，按 Part 类型分流收集 ──────────────────────────────────
+    const textParts: vscode.LanguageModelTextPart[] = []
+    const toolCalls: vscode.LanguageModelToolCallPart[] = []
+
     try {
-      const textStream = await requestStream(model, messages, token)
-      for await (const chunk of textStream) {
-        fullText += chunk
+      const response = await sendChatRequest(model, messages, AVAILABLE_TOOLS, token)
+      for await (const part of response.stream) {
+        if (part instanceof vscode.LanguageModelTextPart) {
+          textParts.push(part)
+        } else if (part instanceof vscode.LanguageModelToolCallPart) {
+          toolCalls.push(part)
+        }
       }
     } catch (err) {
       if (err instanceof vscode.LanguageModelError) {
@@ -87,23 +73,40 @@ export async function runAgentLoop(
       throw err
     }
 
-    const result = parseResponse(fullText)
-    isDonePending = result.isDone
-    log(`[Loop] 第 ${round} 轮完成，isDone=${isDonePending}`)
+    // 将本轮 assistant 消息（文本 + 工具调用）写入上下文，下一轮可见
+    contextBuilder.appendAssistantWithToolCalls(textParts, toolCalls)
+    log(`[Loop] 第 ${round} 轮完成，文本段=${textParts.length}，工具调用=${toolCalls.length}`)
 
-    // 将本轮回复追加进上下文，下一轮可见
-    contextBuilder.appendAssistant(fullText)
-
-    if (isDonePending) {
-      // 任务完成：一次性输出最终答案
-      // 扩展点：若需要真正的流式体验，可将 requestStream 的 for-await 与
-      // stream.markdown(chunk) 合并，但需要 parseResponse 支持流式判断
-      stream.markdown(result.output)
+    // ── 无工具调用：任务完成，输出最终文本 ───────────────────────────────────
+    if (toolCalls.length === 0) {
+      stream.markdown(textParts.map((p) => p.value).join(''))
       break
     }
 
-    // 扩展点：任务未完成时，在此处执行 action（调工具、读文件等）
-    // const observation = await executeAction(result.action, stream)
-    // contextBuilder.appendObservation(observation)
+    // ── 有工具调用：执行每个工具，收集结果，追加后继续下一轮 ─────────────────
+    const toolResults: vscode.LanguageModelToolResultPart[] = []
+
+    for (const call of toolCalls) {
+      try {
+        const resultText = await executeTool(call.name, call.input, token)
+        toolResults.push(
+          new vscode.LanguageModelToolResultPart(call.callId, [
+            new vscode.LanguageModelTextPart(resultText),
+          ]),
+        )
+        log(`[Loop] 工具 ${call.name} 完成`)
+      } catch (err) {
+        // 工具执行失败不终止循环，将错误信息回传给 LLM，由 LLM 决定如何处理
+        const errMsg = err instanceof Error ? err.message : String(err)
+        log(`[Loop] 工具 ${call.name} 失败：${errMsg}`)
+        toolResults.push(
+          new vscode.LanguageModelToolResultPart(call.callId, [
+            new vscode.LanguageModelTextPart(`执行失败：${errMsg}`),
+          ]),
+        )
+      }
+    }
+
+    contextBuilder.appendToolResults(toolResults)
   }
 }
