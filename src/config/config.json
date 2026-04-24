@@ -1,0 +1,10 @@
+{
+  "backend": {
+    "enabled": false,
+    "url": "http://localhost:3000/v1/chat"
+  },
+  "llm": {
+    "vendor": "copilot",
+    "family": "gpt-4o"
+  }
+}

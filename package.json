@@ -39,24 +39,9 @@
     "languageModelChatProviders": [
       {
         "vendor": "modux",
-        "displayName": "Modux Agent"
+        "displayName": "Modux"
       }
-    ],
-    "configuration": {
-      "title": "Modux Agent",
-      "properties": {
-        "modux-agent.backend.enabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "是否将聊天请求转发到自定义后端服务"
-        },
-        "modux-agent.backend.url": {
-          "type": "string",
-          "default": "http://localhost:3000/v1/chat",
-          "description": "后端服务的请求地址（仅在 modux-agent.backend.enabled 为 true 时生效）"
-        }
-      }
-    }
+    ]
   },
   "scripts": {
     "dev": "vite build --watch",

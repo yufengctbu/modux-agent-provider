@@ -1,7 +1,7 @@
 import * as vscode from 'vscode'
 import { AGENT_ID } from '../shared/constants'
 import { handleChatRequest } from '../chat/handler'
-import { ModuxModelProvider } from '../llm/modux-provider'
+import { ModuxModelProvider } from './lm-provider'
 import { log } from '../shared/logger'
 
 /**

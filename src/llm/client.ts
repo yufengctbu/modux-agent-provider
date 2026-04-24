@@ -1,16 +1,10 @@
 import * as vscode from 'vscode'
+import { config } from '../config'
 import { log } from '../shared/logger'
 
-/**
- * LLM 模型配置，仅 llm 层使用
- * 修改此处即可切换底层模型，无需改动其他层
- */
-const MODEL_CONFIG = {
-  /** 模型提供方，固定为 copilot */
-  vendor: 'copilot',
-  /** 模型系列，可选值如 'gpt-4o' | 'gpt-4o-mini' | 'claude-sonnet-4-5' */
-  family: 'gpt-4o',
-} as const
+// 底层 LLM 配置从 src/config/config.json 的 llm 字段读取
+// 可修改 config.json 中的 vendor / family 切换模型，无需改动此文件
+const MODEL_CONFIG = config.llm
 
 /**
  * 选取可用的 Copilot 语言模型
