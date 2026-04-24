@@ -737,6 +737,8 @@ async function compactHistory(
 
 **降级策略**：若摘要调用失败（超时、网络错误），降级为原有截断逻辑，不影响主流程。
 
+> **VS Code API 限制说明**：`ChatContext.history` 的 `ChatResponseTurn.response` 只包含渲染输出的 `ChatResponseMarkdownPart`，不含 `LanguageModelToolCallPart` / `LanguageModelToolResultPart`。因此历史摘要压缩**仅能压缩当前 Turn 内的 loop 消息**，跨 Turn 的工具细节在上一个 Turn 结束时即已丢失（只保留文本摘要）。这是 VS Code API 的架构限制，非方案缺陷。摘要应覆盖当前 Turn 内的完整 loop 上下文，而非试图恢复已结束 Turn 的工具历史。
+
 **config.json 新增**（已整合入 Phase 1.7 的最终 config）：
 
 ```json
@@ -814,6 +816,8 @@ ensureToolResultsComplete(): void {
 
 ## Phase 4 — LM Provider 后端消息规范化
 
+> **路径边界说明**：本 Phase 仅适用于 **LM Provider 路径**（用户从模型选择器选中"Modux"）。Agent Loop 工具调用发生在 **Chat Participant 路径**（`@modux-agent`），两条路径相互独立，Phase 4 的改动不影响也不包含工具调用逻辑。
+
 **灵感来源**：Claude Code `utils/messages/mappers.ts`（SDK ↔ 内部格式转换）
 
 **当前问题**：`lm-provider.ts` 转发消息时只提取 `LanguageModelTextPart`，工具调用历史（`LanguageModelToolCallPart` / `LanguageModelToolResultPart`）被静默丢弃，后端收到的消息上下文不完整。
@@ -866,6 +870,16 @@ try {
 // 支持 { content: "..." } 和 { choices: [{ delta: { content: "..." } }] } 两种格式
 const content = chunk.content ?? chunk.choices?.[0]?.delta?.content ?? null
 if (content) progress.report(new vscode.LanguageModelTextPart(content))
+```
+
+**④ VS Code 工具附件处理**：当用户在 Copilot Chat 内使用 `#file`、`#codebase` 等内置工具附件后选择 Modux 模型时，VS Code 会将这些工具定义通过 `options.tools` 传入 `provideLanguageModelChatResponse`。当前实现忽略了 `_options`，导致附件工具静默丢失。
+
+处理策略：将 `options.tools` 中的工具定义序列化后追加到消息体转发给后端（格式与 `backend.messageFormat` 一致）。若后端不支持工具调用，可在 config 增加 `backend.forwardTools: false` 跳过（默认 `true`）：
+
+```typescript
+// provideLanguageModelChatResponse 中
+const toolDefs = _options.tools && _options.tools.length > 0 ? [..._options.tools] : undefined
+body = JSON.stringify({ messages: serializedMessages, ...(toolDefs ? { tools: toolDefs } : {}) })
 ```
 
 ---
@@ -991,3 +1005,264 @@ for (const batch of partitionToolCalls(toolCalls)) {
 1. **write_file 权限确认**：后续可加 `vscode.window.showWarningMessage` 二次确认，类比 Claude Code `ToolPermissionContext`
 2. **Token 预算精确控制**：接入 `vscode.lm.countTokens()` 代替 `maxHistoryTurns` 截断，类比 Claude Code `tokenBudget.ts`
 3. **后端 messageFormat 切换**：config 新增 `backend.messageFormat: "text" | "openai"`，支持标准 OpenAI tool 消息格式
+
+---
+
+## 实施步骤拆分
+
+> 每个步骤独立可构建（`npm run build` 零报错），可逐步提交。步骤内有依赖关系的子任务须按序完成，步骤间无跨步骤依赖（除标注外）。
+
+### 步骤 1：扩展 config.json（Phase 1.7）
+
+**目标**：为后续所有步骤提供配置基础，无代码逻辑，风险为零。
+
+**改动**：
+
+- 替换 `src/config/config.json` 为 Phase 1.7 中的完整版本（新增 `tools`、`agent` 两个块）
+
+**验证**：`npm run build` 通过，`config.tools`、`config.agent` 字段可在 TS 中访问（`resolveJsonModule: true` 自动推断）。
+
+---
+
+### 步骤 2：新建工具接口与文件工具（Phase 1.1 + 1.2）
+
+**目标**：建立工具体系骨架，完成最基础的 `read_file` + `list_dir`。
+
+**改动**：
+
+1. 新建 `src/chat/tools/types.ts`：`ModuxTool` 接口（含 `isReadOnly`、`maxResultChars`）
+2. 新建 `src/chat/tools/file-tools.ts`：实现 `readFileTool`、`listDirTool`、`writeFileTool`
+   - `read_file`：带行号（cat -n）、最多 2000 行、`maxResultChars: 20000`、`isReadOnly: true`
+   - `list_dir`：排除 `.git/`、`node_modules/`、`dist/`，最多 100 条、`isReadOnly: true`
+   - `write_file`：全量写文件，`isReadOnly: false`，config 默认 disabled
+
+**验证**：`npm run build` 通过。
+
+---
+
+### 步骤 3：新建 edit_file 工具（Phase 1.4）
+
+**目标**：完成 str_replace 精准编辑工具，是最核心的写操作工具。
+
+**改动**：
+
+- 新建 `src/chat/tools/edit-tool.ts`：实现 `editFileTool`
+  - `old_string` 唯一匹配校验，失败返回描述性错误
+  - 成功返回 `"OK"` + 前后 5 行上下文
+  - `isReadOnly: false`，config 默认 enabled
+
+**验证**：`npm run build` 通过。
+
+---
+
+### 步骤 4：新建 search_code 工具（Phase 1.3）
+
+**目标**：完成基于 `vscode.workspace.findTextInFiles()` 的代码搜索工具。
+
+**改动**：
+
+- 新建 `src/chat/tools/search-tool.ts`：实现 `searchCodeTool`
+  - 三种 `outputMode`：`files_with_matches`（默认）、`content`、`count`
+  - 排除 `node_modules/`、`dist/`、`.git/`
+  - `isReadOnly: true`，config 默认 enabled
+
+**验证**：`npm run build` 通过。
+
+---
+
+### 步骤 5：新建 run_command 工具（Phase 1.5）
+
+**目标**：完成 shell 命令执行工具（默认关闭）。
+
+**改动**：
+
+- 新建 `src/chat/tools/bash-tool.ts`：实现 `runCommandTool`
+  - 超时从 `config.tools.runCommand.timeoutMs` 读取
+  - 输出截断至 `maxResultChars: 4000`
+  - `isReadOnly: false`，config 默认 disabled
+
+**验证**：`npm run build` 通过。
+
+---
+
+### 步骤 6：改写 registry.ts（Phase 1.6）
+
+**目标**：将工具注册表由空壳改为完整实现，接入步骤 2–5 的所有工具。
+
+**改动**：
+
+- 改写 `src/chat/tools/registry.ts`：
+  - `ALL_TOOLS` 汇总 6 个工具
+  - `TOOL_KEY_MAP` 解决 camelCase / snake_case 映射
+  - `isToolEnabled()` 读取 config 过滤
+  - `executeTool()` 加入输入类型校验 + registry 层统一截断（`DEFAULT_TOOL_RESULT_MAX_CHARS = 20000`）
+
+**依赖**：步骤 1–5 全部完成。
+
+**验证**：`npm run build` 通过；工具列表可在 TS 中正确导出。
+
+---
+
+### 步骤 7：新建 workspace.ts（Phase 2.1 + 2.3）
+
+**目标**：完成工作区上下文采集器（git 信息）和 Memory 文件加载。
+
+**改动**：
+
+- 新建 `src/chat/workspace.ts`，包含：
+  - `WorkspaceContext` 接口（`projectRoot`、`gitBranch`、`gitMainBranch`、`gitStatus`、`gitRecentCommits`、`today`）
+  - `getWorkspaceContext()`：`Promise.all` 并发采集 4 个 git 命令 + 模块级 `cachedContext` 缓存
+  - `loadMemoryFile()`：按 `AGENTS.md → .modux/memory.md → CLAUDE.md` 优先级查找，最多 4000 字符
+
+**验证**：`npm run build` 通过。
+
+---
+
+### 步骤 8：增加 DEFAULT_SYSTEM_PROMPT（Phase 2.2）
+
+**目标**：将行为约束写入常量，供 ContextBuilder 注入。
+
+**改动**：
+
+- 在 `src/shared/constants.ts` 中增加 `DEFAULT_SYSTEM_PROMPT` 常量（Phase 2.2 完整内容，含安全原则、工具使用原则、任务执行纪律、输出原则、工具结果处理 5 个段落）
+
+**验证**：`npm run build` 通过；常量可正确导出。
+
+---
+
+### 步骤 9：改写 context.ts（Phase 2.4 + 2.6）
+
+**目标**：`ContextBuilder` 接入 WorkspaceContext、注入 4 层 Prompt、新增历史摘要压缩、新增孤儿清理。
+
+**改动**：
+
+- 改写 `src/chat/context.ts`：
+  - 构造函数新增 `wsCtx: WorkspaceContext` 参数
+  - 4 层 Prompt 构建（system prompt + 用户追加 + memory + workspace info）
+  - `compactHistory()` 函数：超 `compactThreshold` 轮触发 LLM 摘要，失败降级截断
+  - `ensureToolResultsComplete()` 方法：修复孤儿 `ToolCallPart`
+
+**依赖**：步骤 7、8 完成。
+
+**验证**：`npm run build` 通过。
+
+---
+
+### 步骤 10：改动 handler.ts（Phase 2.5）
+
+**目标**：handler 获取工作区上下文并传入 runAgentLoop。
+
+**改动**：
+
+- 改写 `src/chat/handler.ts`：
+  - 调用 `getWorkspaceContext()` 获取 `wsCtx`
+  - 将 `wsCtx` 传入 `runAgentLoop()`
+
+**依赖**：步骤 7 完成。
+
+**验证**：`npm run build` 通过（此时 loop.ts 签名尚未更新，需同步改签名，见步骤 11）。
+
+---
+
+### 步骤 11：改写 loop.ts（Phase 3 + loop 签名变更）
+
+**目标**：Agent Loop 完整升级：流式输出、progress 通知、config 驱动轮次、孤儿清理、wsCtx 参数接入。
+
+**改动**：
+
+- 改写 `src/chat/loop.ts`：
+  - `runAgentLoop` 签名新增 `wsCtx: WorkspaceContext` 参数，传入 `ContextBuilder`
+  - 每轮文本立即 `stream.markdown()`（不等最后一轮）
+  - 工具执行前 `stream.progress(\`调用工具：${call.name}\`)`
+  - 轮次上限改为 `config.agent.maxLoopRounds`
+  - loop 结束前调用 `contextBuilder.ensureToolResultsComplete()`
+
+**依赖**：步骤 6、9、10 完成。
+
+**验证**：
+
+- `npm run build` 通过
+- F5 启动：`@modux 列出当前目录` → 可见 progress spinner + 目录内容流式输出
+- `@modux 你是谁` → 回复包含 git 分支和项目信息
+
+---
+
+### 步骤 12：改写 lm-provider.ts（Phase 4）
+
+**目标**：LM Provider 路径的消息规范化，修复工具历史丢失、AbortController 取消、工具附件转发。
+
+**改动**：
+
+- 改写 `src/provider/lm-provider.ts`：
+  - `content` 序列化处理全部 Part 类型（TextPart / ToolCallPart / ToolResultPart）
+  - `AbortController` 正确连接 `token.onCancellationRequested`
+  - SSE 解析同时支持 `{ content }` 和 `{ choices[0].delta.content }` 格式
+  - `options.tools` 序列化后追加到请求体（VS Code 工具附件转发）
+
+**依赖**：步骤 1 完成（config 读取）。
+
+**验证**：
+
+- `npm run build` 通过
+- `backend.enabled=true` 时 Network Monitor 验证后端收到完整消息（含工具历史）
+- 发送后立即取消 → 请求正确中止
+
+---
+
+### 步骤 13：并发工具执行（Phase 5）
+
+**目标**：激活 `isReadOnly` 字段，连续只读段并发执行，写工具串行。
+
+**改动**：
+
+- 改写 `src/chat/loop.ts` 工具执行段：
+  - 新增 `partitionToolCalls()` 函数：按原始顺序连续分段
+  - 只读批次 `Promise.all` 并发；写工具逐个串行
+  - 结果按 `callId` 存入 `Map` 后统一追加 `toolResults`
+
+**依赖**：步骤 11 完成。
+
+**验证**：
+
+- `npm run build` 通过
+- 构造需要同时 `read_file` + `list_dir` 的请求 → 两个工具并发启动（progress 同时出现）
+
+---
+
+## 最终目录结构
+
+```
+modux-agent-provider/
+├── src/
+│   ├── extension.ts                  # 不变
+│   ├── chat/
+│   │   ├── context.ts                # 改写（4 层 Prompt + 历史压缩 + 孤儿清理）
+│   │   ├── handler.ts                # 改动（获取 wsCtx，传入 runAgentLoop）
+│   │   ├── loop.ts                   # 改写（流式 + progress + 并发工具执行）
+│   │   ├── workspace.ts              # 新建（git 上下文采集 + Memory 文件加载）
+│   │   └── tools/
+│   │       ├── types.ts              # 新建（ModuxTool 接口）
+│   │       ├── registry.ts           # 改写（注册表 + 截断 + 按 config 过滤）
+│   │       ├── file-tools.ts         # 新建（read_file / list_dir / write_file）
+│   │       ├── edit-tool.ts          # 新建（edit_file — str_replace 精准编辑）
+│   │       ├── search-tool.ts        # 新建（search_code — findTextInFiles）
+│   │       └── bash-tool.ts          # 新建（run_command）
+│   ├── config/
+│   │   ├── config.json               # 扩展（tools + agent 配置块）
+│   │   └── index.ts                  # 不变
+│   ├── llm/
+│   │   └── client.ts                 # 不变
+│   ├── provider/
+│   │   ├── index.ts                  # 不变
+│   │   └── lm-provider.ts            # 改写（消息规范化 + AbortController + 附件转发）
+│   └── shared/
+│       ├── constants.ts              # 增加 DEFAULT_SYSTEM_PROMPT
+│       └── logger.ts                 # 不变
+├── AGENTS.md                         # 可选：项目级 Agent 指令（用户创建）
+├── package.json                      # 不变
+├── tsconfig.json                     # 不变
+├── vite.config.ts                    # 不变
+└── PLAN.md                           # 本文件
+```
+
+**文件计数**：新建 6 个，改写/改动 7 个，不变 8 个。
