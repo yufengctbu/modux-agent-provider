@@ -1,10 +1,26 @@
 {
   "backend": {
     "enabled": false,
-    "url": "http://localhost:3000/v1/chat"
+    "url": "http://localhost:3000/v1/chat",
+    "forwardTools": true
   },
   "llm": {
     "vendor": "copilot",
     "family": "gpt-4o"
+  },
+  "tools": {
+    "readFile": { "enabled": true },
+    "listDir": { "enabled": true },
+    "editFile": { "enabled": true },
+    "searchCode": { "enabled": true },
+    "writeFile": { "enabled": false },
+    "runCommand": { "enabled": false, "timeoutMs": 10000 }
+  },
+  "agent": {
+    "systemPrompt": "",
+    "maxLoopRounds": 10,
+    "maxHistoryTurns": 20,
+    "compactHistoryEnabled": true,
+    "compactThreshold": 10
   }
 }
