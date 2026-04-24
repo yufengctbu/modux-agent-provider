@@ -1,0 +1,56 @@
+{
+  "name": "modux-agent-provider",
+  "displayName": "Modux Agent Provider",
+  "description": "将 modux-agent 注册为 Copilot Chat 参与者的 VS Code 扩展",
+  "version": "0.0.1",
+  "publisher": "modux",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "keywords": [
+    "copilot",
+    "agent",
+    "chat",
+    "modux"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.cjs",
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "modux-agent.modux-agent",
+        "name": "modux-agent",
+        "description": "Modux Agent — 你的智能编码助手",
+        "isSticky": true
+      }
+    ]
+  },
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "vite build",
+    "package": "npm run build && vsce package --no-dependencies",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\""
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.95.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "@vscode/vsce": "^3.0.0",
+    "eslint": "^9.0.0",
+    "prettier": "^3.0.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.0.0",
+    "vite": "^6.0.0"
+  }
+}

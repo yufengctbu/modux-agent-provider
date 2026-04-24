@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    // Vite 负责实际编译输出，TS 仅做类型检查
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true
+  },
+  // src 源码 + 根目录配置文件（vite.config.ts 等）
+  "include": ["src/**/*.ts", "*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
