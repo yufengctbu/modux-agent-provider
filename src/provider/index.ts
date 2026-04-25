@@ -1,7 +1,7 @@
 import * as vscode from 'vscode'
 import { AGENT_ID } from '../constants/common'
 import { handleChatRequest } from '../chat/handler'
-import { ModuxModelProvider } from './lm-provider'
+import { LmProvider } from './LmProvider'
 import { log } from '../shared/logger'
 
 /**
@@ -24,7 +24,7 @@ export function registerAgent(context: vscode.ExtensionContext): void {
 
   // 2. 注册 Language Model Provider（Copilot Chat 模型下拉列表）
   //    vendor 必须与 package.json contributes.languageModelChatProviders[].vendor 一致
-  const lmProvider = vscode.lm.registerLanguageModelChatProvider('modux', new ModuxModelProvider())
+  const lmProvider = vscode.lm.registerLanguageModelChatProvider('modux', new LmProvider())
   context.subscriptions.push(lmProvider)
   log('Language Model Provider 已注册：vendor=modux')
 }

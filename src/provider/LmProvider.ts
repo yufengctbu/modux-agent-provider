@@ -49,7 +49,7 @@ const CHARS_PER_TOKEN = 4
  * 当 backend.enabled = true 时将消息转发至 backend.url，
  * 支持 SSE 流式和普通 JSON 两种响应格式。
  */
-export class ModuxModelProvider implements vscode.LanguageModelChatProvider {
+export class LmProvider implements vscode.LanguageModelChatProvider {
   /**
    * 返回本 provider 提供的模型元数据
    * VS Code 据此在模型选择器中展示 "Modux Agent"
