@@ -22,17 +22,24 @@ import rawConfig from './config.json'
  *   .vendor         底层 Copilot 模型提供方（固定为 "copilot"）
  *   .family         底层模型系列，可改为 "gpt-4o-mini" / "claude-sonnet-4-5" 等
  *
- * tools             各工具开关（对应 chat/tools/ 下的每个工具实现）
+ * tools             各工具开关（对应 src/tools/ 下的每个工具实现）
  *   .readFile       读取文件内容（默认开启）
  *   .listDir        列出目录（默认开启）
+ *   .findFiles      glob 文件路径发现（默认开启）
+ *   .searchCode     代码内容搜索（默认开启）
  *   .editFile       str_replace 精准编辑（默认开启）
- *   .searchCode     代码搜索（默认开启）
  *   .writeFile      全量写文件（默认关闭，危险操作）
+ *   .webFetch       网页内容抓取（默认开启）
+ *   .webSearch      网页关键词搜索（默认开启）
+ *   .lspInfo        LSP 诊断/定义/引用查询（默认开启）
+ *   .todoWrite      会话任务清单（默认开启）
+ *   .askUser        向用户提问（默认开启）
  *   .runCommand     执行 shell 命令（默认关闭，危险操作）
  *     .timeoutMs    命令执行超时（毫秒）
  *
  * agent
  *   .systemPrompt           追加到 DEFAULT_SYSTEM_PROMPT 之后的自定义指令
+ *   .language               响应语言（如 "Chinese (Simplified)"、"Japanese"）；留空时 AI 自行判断语言
  *   .maxLoopRounds          Agent Loop 单次任务最大循环轮次
  *   .compactThreshold       触发 LLM 历史摘要压缩的消息轮数阈值（优先路径）
  *   .maxHistoryTurns        摘要失败时的兜底硬截断轮数（应高于 compactThreshold）

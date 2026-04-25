@@ -1,15 +1,16 @@
 import * as vscode from 'vscode'
 import { registerAgent } from './provider/index'
-import { initLogger, log } from './shared/logger'
+import { registerLogger, log } from './shared/logger'
 
 /**
  * 扩展激活入口
  * VS Code 在满足 activationEvents 时自动调用此函数
  */
 export function activate(context: vscode.ExtensionContext): void {
-  initLogger(context)
+  registerLogger(context) // 注册日志
   log('modux-agent 已激活')
-  registerAgent(context)
+
+  registerAgent(context) // 注册 Agent
 }
 
 /**

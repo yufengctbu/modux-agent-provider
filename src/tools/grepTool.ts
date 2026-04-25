@@ -2,11 +2,10 @@ import * as fs from 'node:fs/promises'
 import * as vscode from 'vscode'
 import type { ModuxTool } from './types'
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 工具区域：代码搜索
+// ***
+// 工具组：代码搜索
 //   - search_code  基于 vscode.workspace.findFiles + 手动正则搜索
 //
-// 设计来源：Claude Code GrepTool（ripgrep）+ GlobTool
 // 核心价值：read_file/list_dir 只能处理"已知路径"，search_code 支持从代码片段
 //           出发定位相关文件，是"先搜索再精读"工作流的基础。
 //
@@ -14,7 +13,7 @@ import type { ModuxTool } from './types'
 //   该 API 在 @types/vscode ^1.100 已移除，改为 proposed API，不适合稳定扩展使用。
 //   当前方案：findFiles（glob 匹配）+ fs.readFile（内容读取）+ RegExp（搜索），
 //   行为与 ripgrep 完全对等，且不依赖任何 proposed API。
-// ─────────────────────────────────────────────────────────────────────────────
+// ***
 
 // ── 常量 ──────────────────────────────────────────────────────────────────────
 
@@ -76,27 +75,29 @@ interface LineMatch {
 export const searchCodeTool: ModuxTool = {
   name: 'search_code',
   description:
-    '在工作区中搜索匹配指定模式的代码。支持正则表达式。' +
-    '三种输出模式：' +
-    'files_with_matches（默认）—— 只返回匹配文件路径，快速定位；' +
-    'content —— 返回匹配行及上下文，用于深入分析；' +
-    'count —— 返回各文件的匹配数量，评估影响范围。' +
-    '建议先用 files_with_matches 定位，再用 read_file 精读目标文件。',
+    'Search the workspace for code matching a pattern (full JS regex syntax supported). ' +
+    'Three output modes: ' +
+    'files_with_matches (default) — returns only matching file paths for quick location; ' +
+    'content — returns matching lines with surrounding context for detailed reading; ' +
+    'count — returns per-file match counts to assess scope. ' +
+    'Prefer files_with_matches first to locate, then read_file to dive into specific files.',
   inputSchema: {
     type: 'object',
     properties: {
       pattern: {
         type: 'string',
-        description: '搜索 pattern（支持正则表达式，如 "export function|export const"）',
+        description:
+          'Search pattern (JS regex syntax, e.g. "export function|export const", "interface\\s+\\w+")',
       },
       glob: {
         type: 'string',
-        description: '文件过滤 glob（可选，如 "**/*.ts" 只搜 TypeScript 文件）',
+        description:
+          'Optional file filter glob (e.g. "**/*.ts" to search TypeScript files only)',
       },
       outputMode: {
         type: 'string',
         description:
-          '输出模式：files_with_matches（默认）| content（含上下文行）| count（各文件计数）',
+          'Output mode: files_with_matches (default) | content (matching lines with context) | count (per-file match counts)',
       },
     },
     required: ['pattern'],
@@ -112,7 +113,7 @@ export const searchCodeTool: ModuxTool = {
     try {
       regex = new RegExp(pattern, 'g')
     } catch {
-      return `搜索失败：无效的正则表达式 "${pattern}"。`
+      return `Search failed: invalid regular expression "${pattern}".`
     }
 
     // ── 第 1 步：用 findFiles 获取候选文件列表 ────────────────────────────────
@@ -125,7 +126,7 @@ export const searchCodeTool: ModuxTool = {
     )
 
     if (uris.length === 0) {
-      return `未找到符合 glob "${includePattern}" 的文件。`
+      return `No files matched the glob "${includePattern}".`
     }
 
     // ── 第 2 步：逐文件读取并搜索 ──────────────────────────────────────────────
@@ -177,7 +178,7 @@ export const searchCodeTool: ModuxTool = {
     }
 
     if (fileMatches.length === 0) {
-      return `未找到匹配 "${pattern}" 的内容${glob ? `（限定范围：${glob}）` : ''}。`
+      return `No matches for "${pattern}"${glob ? ` (scope: ${glob})` : ''}.`
     }
 
     // ── 第 3 步：按输出模式格式化结果 ────────────────────────────────────────
@@ -208,9 +209,9 @@ function formatFilesWithMatches(fileMatches: FileMatch[], root: string): string 
   const total = fileMatches.length
   const suffix =
     total > MAX_FILES_WITH_MATCHES
-      ? `\n（仅显示前 ${MAX_FILES_WITH_MATCHES} 个文件，共 ${total} 个）`
+      ? `\n(Showing first ${MAX_FILES_WITH_MATCHES} of ${total} files. Refine the pattern to narrow down.)`
       : ''
-  return `匹配文件（${files.length} 个）：\n${files.join('\n')}${suffix}`
+  return `Matching files (${files.length}):\n${files.join('\n')}${suffix}`
 }
 
 /** 输出各文件匹配计数（count 模式） */
@@ -223,7 +224,7 @@ function formatCountMode(fileMatches: FileMatch[], root: string): string {
     .sort((a, b) => b.localeCompare(a))
 
   const totalCount = fileMatches.reduce((sum, { lines }) => sum + lines.length, 0)
-  return `匹配数量（${fileMatches.length} 个文件，共 ${totalCount} 处）：\n${lines.join('\n')}`
+  return `Match counts (${fileMatches.length} files, ${totalCount} matches total):\n${lines.join('\n')}`
 }
 
 /** 输出匹配行及上下文（content 模式） */
@@ -251,7 +252,7 @@ function formatContentMode(fileMatches: FileMatch[], root: string): string {
 
   const suffix =
     totalChars >= CONTENT_MODE_MAX_CHARS
-      ? '\n... [结果已截断，请缩小搜索范围或切换为 files_with_matches 模式]'
+      ? '\n... [Output truncated. Narrow the search scope or switch to files_with_matches mode.]'
       : ''
 
   return parts.join('\n\n') + suffix

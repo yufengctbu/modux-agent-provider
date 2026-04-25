@@ -6,6 +6,7 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "lib": ["ES2022"],
+    "types": ["vscode"],
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,

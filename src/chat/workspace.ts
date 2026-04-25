@@ -78,7 +78,7 @@ export async function getWorkspaceContext(): Promise<WorkspaceContext> {
     resolveMainBranch(projectRoot),
     runGitCommand(projectRoot, ['status', '--short']).then((s) =>
       s.length > MAX_GIT_STATUS_CHARS
-        ? s.slice(0, MAX_GIT_STATUS_CHARS) + '\n... [git status 已截断]'
+        ? s.slice(0, MAX_GIT_STATUS_CHARS) + '\n... [git status truncated]'
         : s,
     ),
     runGitCommand(projectRoot, ['log', '--oneline', '-n', '5']),
@@ -86,10 +86,10 @@ export async function getWorkspaceContext(): Promise<WorkspaceContext> {
 
   cachedWorkspaceContext = {
     projectRoot,
-    gitBranch: gitBranch || '（未知分支）',
-    gitMainBranch: gitMainBranch || '（未知主分支）',
-    gitStatus: gitStatus || '（工作区干净）',
-    gitRecentCommits: gitRecentCommits || '（无提交记录）',
+    gitBranch: gitBranch || '(unknown branch)',
+    gitMainBranch: gitMainBranch || '(unknown main branch)',
+    gitStatus: gitStatus || '(workspace clean)',
+    gitRecentCommits: gitRecentCommits || '(no commits)',
     today: new Date().toISOString().slice(0, 10),
   }
 
@@ -115,7 +115,7 @@ export async function loadMemoryFile(projectRoot: string): Promise<string | null
 
       const truncated =
         trimmed.length > MAX_MEMORY_FILE_CHARS
-          ? trimmed.slice(0, MAX_MEMORY_FILE_CHARS) + '\n... [Memory 文件已截断]'
+          ? trimmed.slice(0, MAX_MEMORY_FILE_CHARS) + '\n... [Memory file truncated]'
           : trimmed
 
       log(`[Workspace] 已加载 Memory 文件：${candidate}`)

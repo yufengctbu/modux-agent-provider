@@ -1,29 +1,33 @@
 import * as vscode from 'vscode'
-import { config } from '../../config'
-import { log } from '../../shared/logger'
-import { editFileTool } from './edit-tool'
-import { readFileTool, listDirTool, writeFileTool } from './file-tools'
-import { searchCodeTool } from './search-tool'
-import { runCommandTool } from './bash-tool'
+import { config } from '../config'
+import { log } from '../shared/logger'
+import { askUserTool } from './askUserTool'
+import { editFileTool } from './editTool'
+import { findFilesTool } from './globTool'
+import { lspTool } from './lspTool'
+import { readFileTool, listDirTool } from './readFileTool'
+import { searchCodeTool } from './grepTool'
+import { runCommandTool } from './bashTool'
+import { todoWriteTool } from './todoTool'
+import { webFetchTool } from './webFetchTool'
+import { webSearchTool } from './webSearchTool'
+import { writeFileTool } from './writeFileTool'
 import type { ModuxTool } from './types'
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ***
 // 工具注册表
 //
 // 职责：
 //   1. 汇总所有工具实现（ALL_TOOLS）
 //   2. 按 config.tools.xxx.enabled 过滤，生成向 LLM 声明的工具列表（AVAILABLE_TOOLS）
 //   3. 分发工具调用请求（executeTool），统一做输入校验和结果截断
-//
-// 设计来源：Claude Code getTools(config) 工厂函数 + applyToolResultBudget()
-// ─────────────────────────────────────────────────────────────────────────────
+// ***
 
 // ── 常量 ──────────────────────────────────────────────────────────────────────
 
 /**
  * 全局工具结果大小限制（字符数）
- * 工具未设置 maxResultChars 时使用此默认值。
- * 对应 Claude Code DEFAULT_MAX_RESULT_SIZE_CHARS（约 50k），保守取 20000 适配 Copilot token 限制。
+ * 工具未设置 maxResultChars 时使用此默认值，保守取 20000 适配 Copilot token 限制。
  */
 const DEFAULT_TOOL_RESULT_MAX_CHARS = 20_000
 
@@ -36,9 +40,15 @@ const DEFAULT_TOOL_RESULT_MAX_CHARS = 20_000
 const ALL_TOOLS: ModuxTool[] = [
   readFileTool, // read_file   — 读取文件（只读）
   listDirTool, // list_dir    — 列出目录（只读）
+  findFilesTool, // find_files  — glob 文件发现（只读）
+  searchCodeTool, // search_code — 代码内容搜索（只读）
   editFileTool, // edit_file   — str_replace 精准编辑（写）
-  searchCodeTool, // search_code — 代码搜索（只读）
   writeFileTool, // write_file  — 全量写文件（写，危险）
+  webFetchTool, // web_fetch   — 网页内容抓取（只读）
+  webSearchTool, // web_search  — 网页关键词搜索（只读）
+  lspTool, // lsp_info    — LSP 诊断/定义/引用查询（只读）
+  todoWriteTool, // todo_write  — 会话任务清单（写）
+  askUserTool, // ask_user    — 向用户提问（只读）
   runCommandTool, // run_command — 执行 shell 命令（写，危险）
 ]
 
@@ -51,9 +61,15 @@ const ALL_TOOLS: ModuxTool[] = [
 const TOOL_CONFIG_KEY_MAP: Record<string, string> = {
   readFile: 'read_file',
   listDir: 'list_dir',
-  editFile: 'edit_file',
+  findFiles: 'find_files',
   searchCode: 'search_code',
+  editFile: 'edit_file',
   writeFile: 'write_file',
+  webFetch: 'web_fetch',
+  webSearch: 'web_search',
+  lspInfo: 'lsp_info',
+  todoWrite: 'todo_write',
+  askUser: 'ask_user',
   runCommand: 'run_command',
 }
 
@@ -104,12 +120,12 @@ export async function executeTool(
 ): Promise<string> {
   // 基础输入类型守卫（LLM 偶尔会发送非对象 input）
   if (typeof input !== 'object' || input === null) {
-    throw new Error(`工具 "${name}" 收到非法输入类型：${typeof input}`)
+    throw new Error(`Tool "${name}" received invalid input type: ${typeof input}`)
   }
 
   const tool = ALL_TOOLS.find((t) => t.name === name)
   if (!tool) {
-    throw new Error(`未知工具："${name}"`)
+    throw new Error(`Unknown tool: "${name}"`)
   }
 
   log(`[Tool] 执行：${name}，输入：${JSON.stringify(input)}`)
@@ -120,7 +136,7 @@ export async function executeTool(
   const limit = tool.maxResultChars ?? DEFAULT_TOOL_RESULT_MAX_CHARS
   if (result.length > limit) {
     log(`[Tool] ${name} 输出截断：${result.length} → ${limit} 字符`)
-    return result.slice(0, limit) + `\n... [输出已截断，超过 ${limit} 字符限制]`
+    return result.slice(0, limit) + `\n... [Output truncated; exceeded ${limit} character limit]`
   }
 
   return result

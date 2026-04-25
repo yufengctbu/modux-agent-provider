@@ -1,7 +1,8 @@
 import * as vscode from 'vscode'
 import { config } from '../config'
 import { selectModel, sendChatRequest } from '../llm/client'
-import { DEFAULT_SYSTEM_PROMPT } from '../shared/constants'
+import { buildSystemPrompt } from '../constants/prompts'
+import { AVAILABLE_TOOLS } from '../tools/registry'
 import { log } from '../shared/logger'
 import { loadMemoryFile, type WorkspaceContext } from './workspace'
 
@@ -30,16 +31,16 @@ const COMPACT_ACK =
  * LLM 生成摘要时使用的压缩 Prompt
  * 结构化摘要确保后续对话能接续，不丢失关键任务上下文。
  */
-const COMPACT_SYSTEM_PROMPT = `请将以下对话历史压缩为结构化摘要，用于接续后续对话。
+const COMPACT_SYSTEM_PROMPT = `Compress the following conversation history into a structured summary for use in continuing the conversation.
 
-摘要必须包含以下各节：
-1. 用户的核心请求和意图
-2. 已完成的工作（涉及的文件、代码改动、命令执行结果）
-3. 发现的错误及修复方式
-4. 待完成的任务（如有）
-5. 当前工作状态（最近在做什么，进展到哪一步）
+The summary must include the following sections:
+1. The user's core request and intent
+2. Work completed (files involved, code changes, command execution results)
+3. Errors found and how they were fixed
+4. Remaining tasks (if any)
+5. Current working state (what was being done most recently, where progress stands)
 
-格式要求：精炼、信息密度高，保留关键代码片段和文件路径。`
+Format: concise, information-dense; retain key code snippets and file paths.`
 
 // ── ContextBuilder ────────────────────────────────────────────────────────────
 
@@ -72,9 +73,14 @@ export class ContextBuilder {
     const memoryContent = await loadMemoryFile(wsCtx.projectRoot)
     const userSystemPrompt = config.agent.systemPrompt?.trim()
 
-    const systemParts = [DEFAULT_SYSTEM_PROMPT]
-    if (userSystemPrompt) systemParts.push(`\n\n## 用户自定义指令\n${userSystemPrompt}`)
-    if (memoryContent) systemParts.push(`\n\n## 项目指令（Memory）\n${memoryContent}`)
+    const systemParts = [buildSystemPrompt(AVAILABLE_TOOLS.map((t) => t.name))]
+    if (userSystemPrompt) systemParts.push(`\n\n## User Custom Instructions\n${userSystemPrompt}`)
+    if (memoryContent) systemParts.push(`\n\n## Project Instructions (Memory)\n${memoryContent}`)
+    const language = config.agent.language?.trim()
+    if (language)
+      systemParts.push(
+        `\n\n# Language\nAlways respond in ${language}. Use ${language} for all explanations, comments, and communications with the user. Technical terms, code identifiers, and file paths should remain in their original form.`,
+      )
 
     this.messages.push(vscode.LanguageModelChatMessage.User(systemParts.join('')))
 
@@ -84,7 +90,11 @@ export class ContextBuilder {
     // ── 层 3：工作区上下文 ───────────────────────────────────────────────────
     const contextBlock = buildWorkspaceContextBlock(wsCtx)
     this.messages.push(vscode.LanguageModelChatMessage.User(contextBlock))
-    this.messages.push(vscode.LanguageModelChatMessage.Assistant('收到，我已了解当前工作区环境。'))
+    this.messages.push(
+      vscode.LanguageModelChatMessage.Assistant(
+        'Understood. I have the current workspace context.',
+      ),
+    )
 
     // ── 层 4：历史消息（含压缩或截断） ──────────────────────────────────────
     const historyMessages = await buildHistoryMessages(history)
@@ -168,11 +178,11 @@ export class ContextBuilder {
 /** 构建工作区上下文文本块（注入到 Prompt 层 3） */
 function buildWorkspaceContextBlock(wsCtx: WorkspaceContext): string {
   return [
-    `当前项目：${wsCtx.projectRoot}`,
-    `今日：${wsCtx.today}`,
-    `Git 分支：${wsCtx.gitBranch}（主分支：${wsCtx.gitMainBranch}）`,
-    `近期提交：\n${wsCtx.gitRecentCommits}`,
-    `Git 状态：\n${wsCtx.gitStatus}`,
+    `Current project: ${wsCtx.projectRoot}`,
+    `Today: ${wsCtx.today}`,
+    `Git branch: ${wsCtx.gitBranch} (main branch: ${wsCtx.gitMainBranch})`,
+    `Recent commits:\n${wsCtx.gitRecentCommits}`,
+    `Git status:\n${wsCtx.gitStatus}`,
   ].join('\n')
 }
 
@@ -246,7 +256,7 @@ async function compactHistoryWithLLM(
   const compactRequest: vscode.LanguageModelChatMessage[] = [
     vscode.LanguageModelChatMessage.User(COMPACT_SYSTEM_PROMPT),
     ...messages,
-    vscode.LanguageModelChatMessage.User('请按上述格式生成摘要。'),
+    vscode.LanguageModelChatMessage.User('Generate the summary in the format described above.'),
   ]
 
   const tokenSource = new vscode.CancellationTokenSource()
@@ -266,7 +276,7 @@ async function compactHistoryWithLLM(
 
   return [
     vscode.LanguageModelChatMessage.User(
-      `[对话历史摘要 — 此前会话因上下文限制已压缩]\n\n${summary}`,
+      `[Conversation history summary — earlier turns were compacted due to context limits]\n\n${summary}`,
     ),
     vscode.LanguageModelChatMessage.Assistant(COMPACT_ACK),
   ]

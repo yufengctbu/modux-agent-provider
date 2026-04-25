@@ -2,7 +2,7 @@ import * as vscode from 'vscode'
 import { selectModel, sendChatRequest } from '../llm/client'
 import { config } from '../config'
 import { ContextBuilder } from './context'
-import { AVAILABLE_TOOLS, executeTool, findTool } from './tools/registry'
+import { AVAILABLE_TOOLS, executeTool, findTool } from '../tools/registry'
 import type { WorkspaceContext } from './workspace'
 import { log } from '../shared/logger'
 
@@ -149,29 +149,22 @@ async function executeToolCallsInBatches(
   let currentIndex = 0
 
   for (const batch of batches) {
-    const batchStartIndex = currentIndex
-
     if (batch.concurrent) {
       // 并发执行批（只读工具）
       log(`[Loop] 并发执行 ${batch.calls.length} 个只读工具`)
       const results = await Promise.all(
-        batch.calls.map((call, i) => executeSingleTool(call, batchStartIndex + i, stream, token)),
+        batch.calls.map((call, i) => executeSingleTool(call, currentIndex + i, stream, token)),
       )
       indexedResults.push(...results)
     } else {
       // 串行执行批（写工具）
-      for (const call of batch.calls) {
-        const result = await executeSingleTool(call, currentIndex, stream, token)
+      for (let i = 0; i < batch.calls.length; i++) {
+        const result = await executeSingleTool(batch.calls[i], currentIndex + i, stream, token)
         indexedResults.push(result)
-        currentIndex++
       }
-      currentIndex = batchStartIndex // 串行时 currentIndex 已逐步递增，此处无需再加
-      currentIndex += batch.calls.length
-      // 重置以避免双重递增（串行 for 循环已处理，直接继续）
-      currentIndex = batchStartIndex + batch.calls.length
     }
 
-    if (batch.concurrent) currentIndex = batchStartIndex + batch.calls.length
+    currentIndex += batch.calls.length
   }
 
   // 按原始顺序排序，确保 ToolResultPart 与 ToolCallPart 的 callId 配对关系正确
@@ -210,7 +203,7 @@ async function executeSingleTool(
     return [
       index,
       new vscode.LanguageModelToolResultPart(call.callId, [
-        new vscode.LanguageModelTextPart(`执行失败：${errMsg}`),
+        new vscode.LanguageModelTextPart(`Tool execution failed: ${errMsg}`),
       ]),
     ]
   }
@@ -229,9 +222,7 @@ async function executeSingleTool(
  * 示例：
  *   [read, read, write, read] → [{concurrent:true,[read,read]}, {concurrent:false,[write]}, {concurrent:true,[read]}]
  */
-function partitionToolCalls(
-  toolCalls: vscode.LanguageModelToolCallPart[],
-): ToolCallBatch[] {
+function partitionToolCalls(toolCalls: vscode.LanguageModelToolCallPart[]): ToolCallBatch[] {
   if (toolCalls.length === 0) return []
 
   const batches: ToolCallBatch[] = []

@@ -30,7 +30,19 @@ export interface ModuxTool {
    */
   readonly inputSchema: {
     readonly type: 'object'
-    readonly properties: Record<string, { readonly type: string; readonly description: string }>
+    readonly properties: Record<
+      string,
+      {
+        readonly type: string
+        readonly description: string
+        readonly items?: {
+          readonly type: string
+          readonly properties?: Record<string, unknown>
+          readonly required?: readonly string[]
+        }
+        readonly enum?: readonly string[]
+      }
+    >
     readonly required?: readonly string[]
   }
 

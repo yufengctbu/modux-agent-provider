@@ -1,5 +1,5 @@
 import * as vscode from 'vscode'
-import { AGENT_ID } from '../shared/constants'
+import { AGENT_ID } from '../constants/common'
 import { handleChatRequest } from '../chat/handler'
 import { ModuxModelProvider } from './lm-provider'
 import { log } from '../shared/logger'
