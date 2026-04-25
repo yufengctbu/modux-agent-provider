@@ -1,7 +1,7 @@
 import * as http from 'node:http'
 import * as https from 'node:https'
 import * as vscode from 'vscode'
-import type { ModuxTool } from './types'
+import type { ModuxTool } from '../types'
 
 // ***
 // 工具：网页内容抓取
@@ -31,8 +31,10 @@ interface WebFetchInput {
   url: string
 }
 
+export const name = 'web_fetch'
+
 export const webFetchTool: ModuxTool = {
-  name: 'web_fetch',
+  name,
   description:
     'Fetch content from a URL and return it as plain text. HTML pages are automatically converted to readable text (tags stripped). ' +
     'Use this to read documentation, API specs, GitHub raw files, changelogs, or any public web page. ' +

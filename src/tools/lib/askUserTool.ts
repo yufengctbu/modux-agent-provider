@@ -1,5 +1,5 @@
 import * as vscode from 'vscode'
-import type { ModuxTool } from './types'
+import type { ModuxTool } from '../types'
 
 // ***
 // 工具：向用户提问
@@ -22,8 +22,10 @@ interface AskUserInput {
 /** 其他/自定义输入选项的标签 */
 const OTHER_LABEL = 'Other...'
 
+export const name = 'ask_user'
+
 export const askUserTool: ModuxTool = {
-  name: 'ask_user',
+  name,
   description:
     'Ask the user a clarifying question via a VS Code dialog and return their answer. ' +
     "Use this to resolve ambiguity before acting — do not guess when the user's intent is unclear. " +

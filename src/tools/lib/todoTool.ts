@@ -1,5 +1,5 @@
-import { log } from '../shared/logger'
-import type { ModuxTool } from './types'
+import { log } from '../../shared/logger'
+import type { ModuxTool } from '../types'
 
 // ***
 // 工具：会话任务清单
@@ -56,8 +56,10 @@ export function getSessionTodos(): readonly TodoItem[] {
 
 // ── todo_write ────────────────────────────────────────────────────────────────
 
+export const name = 'todo_write'
+
 export const todoWriteTool: ModuxTool = {
-  name: 'todo_write',
+  name,
   description:
     'Create and manage a structured task list for the current session. Use this to track progress on complex multi-step tasks. ' +
     'Each call REPLACES the entire list — always include all tasks (completed, in_progress, and pending). ' +

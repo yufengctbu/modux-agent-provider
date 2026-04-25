@@ -2,7 +2,7 @@ import * as vscode from 'vscode'
 import { selectModel, sendChatRequest } from '../llm/client'
 import { config } from '../config'
 import { ContextBuilder } from './context'
-import { AVAILABLE_TOOLS, executeTool, findTool } from '../tools/registry'
+import { toolsManager } from '../tools'
 import type { WorkspaceContext } from './workspace'
 import { log } from '../shared/logger'
 
@@ -85,7 +85,12 @@ export async function runAgentLoop(
     const toolCalls: vscode.LanguageModelToolCallPart[] = []
 
     try {
-      const response = await sendChatRequest(model, messages, AVAILABLE_TOOLS, token)
+      const response = await sendChatRequest(
+        model,
+        messages,
+        toolsManager.getAvailableTools(),
+        token,
+      )
       for await (const part of response.stream) {
         if (part instanceof vscode.LanguageModelTextPart) {
           textParts.push(part)
@@ -188,7 +193,7 @@ async function executeSingleTool(
   stream.progress(`调用工具：${call.name}`)
 
   try {
-    const resultText = await executeTool(call.name, call.input, token)
+    const resultText = await toolsManager.execute(call.name, call.input, token)
     log(`[Loop] 工具 ${call.name} 执行成功`)
     return [
       index,
@@ -230,7 +235,7 @@ function partitionToolCalls(toolCalls: vscode.LanguageModelToolCallPart[]): Tool
   let currentIsReadOnly: boolean | null = null
 
   for (const call of toolCalls) {
-    const tool = findTool(call.name)
+    const tool = toolsManager.findTool(call.name)
     const isReadOnly = tool?.isReadOnly ?? false // 未知工具保守视为写操作
 
     if (currentIsReadOnly === null) {

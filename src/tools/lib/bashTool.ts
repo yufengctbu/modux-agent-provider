@@ -1,8 +1,8 @@
 import { exec } from 'node:child_process'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
-import { config } from '../config'
-import type { ModuxTool } from './types'
+import { config } from '../../config'
+import type { ModuxTool } from '../types'
 
 // ***
 // 工具组：Shell 命令执行
@@ -27,8 +27,10 @@ interface RunCommandInput {
   cwd?: string
 }
 
+export const name = 'run_command'
+
 export const runCommandTool: ModuxTool = {
-  name: 'run_command',
+  name,
   description:
     'Execute a shell command in the workspace directory and return the combined stdout/stderr output. ' +
     'Use the cwd parameter to run in a subdirectory (relative path). Output longer than 4000 characters is automatically truncated. ' +

@@ -1,6 +1,6 @@
 import * as fs from 'node:fs/promises'
-import type { ModuxTool } from './types'
-import { resolveWorkspacePath } from './utils'
+import type { ModuxTool } from '../types'
+import { resolveWorkspacePath } from '../utils'
 
 // ***
 // 工具组：精准文件编辑
@@ -24,8 +24,10 @@ interface EditFileInput {
   replace_all?: boolean
 }
 
+export const name = 'edit_file'
+
 export const editFileTool: ModuxTool = {
-  name: 'edit_file',
+  name,
   description:
     'Perform a precise str_replace edit on a file in the workspace (old_string → new_string). ' +
     'old_string must match exactly once in the file; if it matches multiple times, add more surrounding context to make it unique. ' +

@@ -1,7 +1,7 @@
 import * as path from 'node:path'
 import * as vscode from 'vscode'
-import type { ModuxTool } from './types'
-import { resolveWorkspacePath } from './utils'
+import type { ModuxTool } from '../types'
+import { resolveWorkspacePath } from '../utils'
 
 // ***
 // 工具：LSP 语言服务信息查询
@@ -47,8 +47,10 @@ interface LspInput {
 
 // ── lsp_info ──────────────────────────────────────────────────────────────────
 
+export const name = 'lsp_info'
+
 export const lspTool: ModuxTool = {
-  name: 'lsp_info',
+  name,
   description:
     'Query the VS Code Language Server for diagnostics, definitions, or references. ' +
     'Actions: ' +
@@ -124,9 +126,7 @@ async function runDiagnostics(filePath: string | undefined): Promise<string> {
   }
 
   if (entries.length === 0) {
-    return filePath
-      ? `No diagnostics for "${filePath}".`
-      : 'No diagnostics in the workspace.'
+    return filePath ? `No diagnostics for "${filePath}".` : 'No diagnostics in the workspace.'
   }
 
   const flat: { rel: string; diag: vscode.Diagnostic }[] = []
@@ -145,7 +145,9 @@ async function runDiagnostics(filePath: string | undefined): Promise<string> {
     const startLine = diag.range.start.line + 1 // 1-based for output
     const startChar = diag.range.start.character
     const source = diag.source ? ` [${diag.source}]` : ''
-    const code = diag.code ? ` (${typeof diag.code === 'object' ? diag.code.value : diag.code})` : ''
+    const code = diag.code
+      ? ` (${typeof diag.code === 'object' ? diag.code.value : diag.code})`
+      : ''
     return `${sev}${source}${code}  ${rel}:${startLine}:${startChar}  ${diag.message}`
   })
 
@@ -202,9 +204,7 @@ async function runLocationProvider(
 
   const locations = raw.slice(0, MAX_LOCATIONS).map((loc) => normalizeLocation(loc, root))
 
-  const lines = locations.map(
-    ({ rel, startLine, startChar }) => `${rel}:${startLine}:${startChar}`,
-  )
+  const lines = locations.map(({ rel, startLine, startChar }) => `${rel}:${startLine}:${startChar}`)
 
   const suffix =
     raw.length > MAX_LOCATIONS ? `\n... [Showing first ${MAX_LOCATIONS} of ${raw.length}]` : ''

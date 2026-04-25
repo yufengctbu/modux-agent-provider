@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
-import type { ModuxTool } from './types'
-import { resolveWorkspacePath } from './utils'
+import type { ModuxTool } from '../types'
+import { resolveWorkspacePath } from '../utils'
 
 // ***
 // 工具：全量写文件
@@ -17,8 +17,10 @@ interface WriteFileInput {
   content: string
 }
 
+export const name = 'write_file'
+
 export const writeFileTool: ModuxTool = {
-  name: 'write_file',
+  name,
   description:
     'Write content to a file in the workspace. Use only for creating new files or completely rewriting existing ones. ' +
     'For targeted modifications to existing files, prefer edit_file (str_replace) to avoid accidental overwrites.',

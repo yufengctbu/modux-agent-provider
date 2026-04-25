@@ -1,7 +1,7 @@
 import * as http from 'node:http'
 import * as https from 'node:https'
 import * as vscode from 'vscode'
-import type { ModuxTool } from './types'
+import type { ModuxTool } from '../types'
 
 // ***
 // 工具：网页搜索
@@ -44,8 +44,10 @@ interface SearchResult {
   snippet: string
 }
 
+export const name = 'web_search'
+
 export const webSearchTool: ModuxTool = {
-  name: 'web_search',
+  name,
   description:
     'Search the web for real-time information and return a list of result titles, URLs, and snippets. ' +
     'Use this for up-to-date facts, library versions, API changes, or when you need to discover authoritative sources. ' +
@@ -55,7 +57,8 @@ export const webSearchTool: ModuxTool = {
     properties: {
       query: {
         type: 'string',
-        description: 'Search keywords (be specific; include version numbers or dates when relevant)',
+        description:
+          'Search keywords (be specific; include version numbers or dates when relevant)',
       },
       maxResults: {
         type: 'number',
@@ -109,7 +112,7 @@ export const webSearchTool: ModuxTool = {
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────────
 
-/** 通过 POST 请求获取 DuckDuckGo HTML 搜索结果页 */
+/** 通过 GET 请求获取 DuckDuckGo HTML 搜索结果页 */
 async function fetchHtml(url: string, token: vscode.CancellationToken): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     if (token.isCancellationRequested) {

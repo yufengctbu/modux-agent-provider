@@ -1,6 +1,6 @@
 import * as fs from 'node:fs/promises'
 import * as vscode from 'vscode'
-import type { ModuxTool } from './types'
+import type { ModuxTool } from '../types'
 
 // ***
 // 工具组：代码搜索
@@ -72,8 +72,10 @@ interface LineMatch {
 
 // ── search_code ───────────────────────────────────────────────────────────────
 
+export const name = 'search_code'
+
 export const searchCodeTool: ModuxTool = {
-  name: 'search_code',
+  name,
   description:
     'Search the workspace for code matching a pattern (full JS regex syntax supported). ' +
     'Three output modes: ' +
@@ -91,8 +93,7 @@ export const searchCodeTool: ModuxTool = {
       },
       glob: {
         type: 'string',
-        description:
-          'Optional file filter glob (e.g. "**/*.ts" to search TypeScript files only)',
+        description: 'Optional file filter glob (e.g. "**/*.ts" to search TypeScript files only)',
       },
       outputMode: {
         type: 'string',

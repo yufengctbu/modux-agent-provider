@@ -2,7 +2,7 @@ import * as vscode from 'vscode'
 import { config } from '../config'
 import { selectModel, sendChatRequest } from '../llm/client'
 import { buildSystemPrompt } from '../constants/prompts'
-import { AVAILABLE_TOOLS } from '../tools/registry'
+import { toolsManager } from '../tools'
 import { log } from '../shared/logger'
 import { loadMemoryFile, type WorkspaceContext } from './workspace'
 
@@ -73,7 +73,7 @@ export class ContextBuilder {
     const memoryContent = await loadMemoryFile(wsCtx.projectRoot)
     const userSystemPrompt = config.agent.systemPrompt?.trim()
 
-    const systemParts = [buildSystemPrompt(AVAILABLE_TOOLS.map((t) => t.name))]
+    const systemParts = [buildSystemPrompt(toolsManager.getAvailableTools().map((t) => t.name))]
     if (userSystemPrompt) systemParts.push(`\n\n## User Custom Instructions\n${userSystemPrompt}`)
     if (memoryContent) systemParts.push(`\n\n## Project Instructions (Memory)\n${memoryContent}`)
     const language = config.agent.language?.trim()

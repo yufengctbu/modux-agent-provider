@@ -1,6 +1,6 @@
 import * as path from 'node:path'
 import * as vscode from 'vscode'
-import type { ModuxTool } from './types'
+import type { ModuxTool } from '../types'
 
 // ***
 // 工具：文件路径发现
@@ -26,8 +26,10 @@ interface FindFilesInput {
   path?: string
 }
 
+export const name = 'find_files'
+
 export const findFilesTool: ModuxTool = {
-  name: 'find_files',
+  name,
   description:
     'Find files in the workspace that match a glob pattern. Returns a sorted list of relative file paths. ' +
     'Use this to discover files by name or extension before reading them. ' +

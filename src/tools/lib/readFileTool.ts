@@ -1,11 +1,9 @@
 import * as fs from 'node:fs/promises'
-import type { ModuxTool } from './types'
-import { resolveWorkspacePath } from './utils'
+import type { ModuxTool } from '../types'
+import { resolveWorkspacePath } from '../utils'
 
 // ***
-// 工具组：文件读取
-//   - read_file  读取工作区文件（带行号，cat -n 格式）
-//   - list_dir   列出目录条目（自动过滤无关目录）
+// 工具：读取工作区文件（带行号，cat -n 格式）
 // ***
 
 // ── 常量 ──────────────────────────────────────────────────────────────────────
@@ -16,12 +14,6 @@ const MAX_LINES_TO_READ = 2000
 /** 超长文件输出时的截断提示阈值 */
 const TRUNCATION_NOTICE_THRESHOLD = MAX_LINES_TO_READ
 
-/** 列目录最多返回条目数 */
-const MAX_DIR_ENTRIES = 100
-
-/** 列目录时自动跳过的无关目录 */
-const IGNORED_DIRS = new Set(['.git', 'node_modules', 'dist', '.vscode', 'out'])
-
 // ── read_file ─────────────────────────────────────────────────────────────────
 
 interface ReadFileInput {
@@ -30,8 +22,10 @@ interface ReadFileInput {
   endLine?: number
 }
 
+export const name = 'read_file'
+
 export const readFileTool: ModuxTool = {
-  name: 'read_file',
+  name,
   description:
     'Read a file from the workspace. Returns content with line numbers (cat -n format) for precise line references. ' +
     'Use startLine/endLine to read a specific range (1-based). Files longer than 2000 lines must be read in sections.',
@@ -85,54 +79,5 @@ export const readFileTool: ModuxTool = {
         : ''
 
     return numbered + suffix
-  },
-}
-
-// ── list_dir ──────────────────────────────────────────────────────────────────
-
-interface ListDirInput {
-  path: string
-}
-
-export const listDirTool: ModuxTool = {
-  name: 'list_dir',
-  description:
-    'List the contents of a directory in the workspace (files and subdirectories). ' +
-    'Automatically skips .git, node_modules, dist, and other irrelevant directories. Returns up to 100 entries.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      path: {
-        type: 'string',
-        description:
-          'Directory path relative to the workspace root. Use "." for the root directory.',
-      },
-    },
-    required: ['path'],
-  },
-  isReadOnly: true,
-
-  async execute(input: unknown): Promise<string> {
-    const { path: dirPath } = input as ListDirInput
-
-    const resolved = resolveWorkspacePath(dirPath)
-    if (typeof resolved === 'object') return resolved.error
-
-    let entries: string[]
-    try {
-      const dirents = await fs.readdir(resolved, { withFileTypes: true })
-      entries = dirents
-        .filter((d) => !IGNORED_DIRS.has(d.name))
-        .slice(0, MAX_DIR_ENTRIES)
-        .map((d) => (d.isDirectory() ? `${d.name}/` : d.name))
-        .sort()
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      return `Failed to list directory "${dirPath}": ${msg}`
-    }
-
-    if (entries.length === 0) return `Directory "${dirPath}" is empty.`
-
-    return `Contents of "${dirPath}" (${entries.length} entries):\n${entries.join('\n')}`
   },
 }

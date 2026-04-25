@@ -14,13 +14,13 @@
     "findFiles": { "enabled": true },
     "searchCode": { "enabled": true },
     "editFile": { "enabled": true },
-    "writeFile": { "enabled": false },
+    "writeFile": { "enabled": true },
     "webFetch": { "enabled": true },
     "webSearch": { "enabled": true },
     "lspInfo": { "enabled": true },
     "todoWrite": { "enabled": true },
     "askUser": { "enabled": true },
-    "runCommand": { "enabled": false, "timeoutMs": 10000 }
+    "runCommand": { "enabled": true, "timeoutMs": 10000 }
   },
   "agent": {
     "systemPrompt": "",
