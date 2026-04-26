@@ -1,6 +1,6 @@
 import * as path from 'node:path'
 import * as vscode from 'vscode'
-import type { ModuxTool } from '../types'
+import type { ModuxTool, ToolExecuteContext } from '../types'
 import { resolveWorkspacePath } from '../utils'
 
 // ***
@@ -87,7 +87,7 @@ export const lspTool: ModuxTool = {
   isReadOnly: true,
   maxResultChars: MAX_RESULT_CHARS,
 
-  async execute(input: unknown): Promise<string> {
+  async execute(input: unknown, _ctx: ToolExecuteContext): Promise<string> {
     const { action, path: filePath, line, character } = input as LspInput
 
     switch (action) {

@@ -39,5 +39,4 @@ declare module 'vscode' {
       metadata?: { readonly [key: string]: unknown },
     )
   }
-
 }

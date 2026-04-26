@@ -1,5 +1,5 @@
 import * as fs from 'node:fs/promises'
-import type { ModuxTool } from '../types'
+import type { ModuxTool, ToolExecuteContext } from '../types'
 import { resolveWorkspacePath } from '../utils'
 
 // ***
@@ -40,7 +40,7 @@ export const listDirTool: ModuxTool = {
   },
   isReadOnly: true,
 
-  async execute(input: unknown): Promise<string> {
+  async execute(input: unknown, _ctx: ToolExecuteContext): Promise<string> {
     const { path: dirPath } = input as ListDirInput
 
     const resolved = resolveWorkspacePath(dirPath)

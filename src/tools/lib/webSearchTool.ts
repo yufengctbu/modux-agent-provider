@@ -1,7 +1,7 @@
 import * as http from 'node:http'
 import * as https from 'node:https'
 import * as vscode from 'vscode'
-import type { ModuxTool } from '../types'
+import type { ModuxTool, ToolExecuteContext } from '../types'
 
 // ***
 // 工具：网页搜索
@@ -70,8 +70,9 @@ export const webSearchTool: ModuxTool = {
   isReadOnly: true,
   maxResultChars: MAX_RESULT_CHARS,
 
-  async execute(input: unknown, token: vscode.CancellationToken): Promise<string> {
+  async execute(input: unknown, ctx: ToolExecuteContext): Promise<string> {
     const { query, maxResults } = input as WebSearchInput
+    const { token } = ctx
     const limit = Math.min(Math.max(1, maxResults ?? MAX_RESULTS), MAX_RESULTS)
 
     if (!query || !query.trim()) {

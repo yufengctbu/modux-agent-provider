@@ -40,6 +40,12 @@
     "maxLoopRounds": 10,
     "maxHistoryTurns": 20,
     "compactHistoryEnabled": true,
-    "compactThreshold": 10
+    "compactThreshold": 10,
+    "fileReadDedupEnabled": true,
+    "maxImageBytes": 5242880,
+    "microcompactEnabled": true,
+    "microcompactKeepRecentToolResults": 6,
+    "microcompactMinToolResultChars": 400,
+    "stripImagesInCompact": true
   }
 }

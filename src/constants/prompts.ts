@@ -30,7 +30,9 @@ const TOOL_GUIDANCE: Record<string, string> = {
   find_files:
     'Use `find_files` to discover files by name or glob pattern (e.g. "**/*.ts", "**/package.json"). Prefer this over guessing paths.',
   read_file:
-    'Use `read_file` to read files at known paths. Do not use `read_file` to guess filenames one by one.',
+    'Use `read_file` to read files at known paths. Do not use `read_file` to guess filenames one by one. ' +
+    'Supports image files (PNG / JPEG / GIF / WebP): vision-capable models receive the image directly; text-only models only see metadata. ' +
+    'If the same file + range is read twice without changes, you will receive a brief "<file-unchanged>" stub — refer back to the previous tool result for the actual content.',
   list_dir: 'Use `list_dir` to understand the overall project structure.',
   edit_file:
     'Use `edit_file` (str_replace diff) to modify existing files. Always read the file with `read_file` first to understand its current content before editing.',
@@ -106,6 +108,9 @@ export function buildSystemPrompt(enabledToolNames: string[]): string {
 - When referencing code, include the file name and line number.`,
 
     `## Tool result handling
-- Tool results may be compacted in conversation history at any time. If a tool result contains important information you will need later, record it in your response immediately — do not rely solely on the original tool result.`,
+- Tool results may be compacted in conversation history at any time. If a tool result contains important information you will need later, record it in your response immediately — do not rely solely on the original tool result.
+- Older tool results may be replaced by a "[Earlier tool result removed by microcompaction...]" placeholder; if you still need that information, re-invoke the tool with the same arguments instead of asking the user.
+- A "<file-unchanged>" stub from \`read_file\` means the prior result is still authoritative — do not re-read the file unless you need a different range.
+- Image files appear as \`Image attached: ...\` text plus an attached image part. If you can see the image, describe what is relevant to the user's task; if you only see metadata text (vision not supported), tell the user explicitly and ask whether to proceed without the visual content.`,
   ].join('\n\n')
 }

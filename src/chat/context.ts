@@ -28,6 +28,16 @@ const COMPACT_ACK =
   'Understood. I have the context from the previous session and will continue from where we left off.'
 
 /**
+ * 微压缩占位文本：替换掉旧的、冗长的 ToolResultPart 文本主体
+ *
+ * 目的：保留 callId 与 ToolCallPart 的配对结构（API 合法性），同时把字符数压缩到接近 0。
+ * 最近的工具结果保持原样（LLM 当前推理的"工作记忆"），早期工具结果折叠为占位。
+ */
+const MICRO_COMPACT_TOOL_RESULT_STUB =
+  '[Earlier tool result removed by microcompaction to save context tokens. ' +
+  'If you need the original content, re-invoke the tool with the same arguments.]'
+
+/**
  * LLM 生成摘要时使用的压缩 Prompt
  * 结构化摘要确保后续对话能接续，不丢失关键任务上下文。
  */
@@ -109,7 +119,11 @@ export class ContextBuilder {
    */
   async buildForFirstRound(userPrompt: string): Promise<vscode.LanguageModelChatMessage[]> {
     await this.ready
-    return [...this.messages, vscode.LanguageModelChatMessage.User(userPrompt)]
+    const compacted = applyMicrocompaction([
+      ...this.messages,
+      vscode.LanguageModelChatMessage.User(userPrompt),
+    ])
+    return compacted
   }
 
   /**
@@ -117,7 +131,7 @@ export class ContextBuilder {
    * 在 loop 第 2+ 轮调用（工具结果已在上一轮末尾追加）。
    */
   buildForContinuationRound(): vscode.LanguageModelChatMessage[] {
-    return [...this.messages]
+    return applyMicrocompaction(this.messages)
   }
 
   // ── 消息追加 ───────────────────────────────────────────────────────────────
@@ -174,6 +188,162 @@ export class ContextBuilder {
 }
 
 // ── 内部工具函数 ──────────────────────────────────────────────────────────────
+
+/**
+ * 微压缩（microcompaction）
+ *
+ * 设计来源：Claude Code microCompact —— 在历史消息中扫描 ToolResultPart，
+ * 把"足够老 + 足够大"的工具结果替换为占位文本，保留 callId 不变以维持 API 合法性。
+ *
+ * 与 LLM 摘要压缩的差异：
+ *   - LLM 摘要：整段历史 → 一段摘要（损失细粒度，但节省最多 token）
+ *   - 微压缩  ：仅替换旧工具结果文本（不动 ToolCall 结构与近期消息）
+ *
+ * 应用顺序：先做微压缩（轻量、无副作用），再做 LLM 摘要（重量、需调用模型）。
+ *
+ * 何时不动：
+ *   - 最后 N 条 ToolResult（默认 6）：当前推理的工作记忆
+ *   - 单条文本 < minChars（默认 400）：压缩反而比原文长
+ *   - DataPart（图像）：图像不属于"文本结果"，由独立的剥离逻辑处理
+ *
+ * 性能：单次扫描 O(n)；返回新的消息数组，不修改原数组（保证 ContextBuilder.messages 不丢数据）。
+ */
+function applyMicrocompaction(
+  messages: ReadonlyArray<vscode.LanguageModelChatMessage>,
+): vscode.LanguageModelChatMessage[] {
+  if (!config.agent.microcompactEnabled) return [...messages]
+
+  const keepRecent = Math.max(0, config.agent.microcompactKeepRecentToolResults ?? 6)
+  const minChars = Math.max(0, config.agent.microcompactMinToolResultChars ?? 400)
+
+  // 第一遍：从右向左数 ToolResultPart 出现次数，确定"哪些需要保留原样"的 callId 集合
+  const recentCallIds = new Set<string>()
+  for (let i = messages.length - 1; i >= 0 && recentCallIds.size < keepRecent; i--) {
+    const content = messages[i].content as vscode.LanguageModelInputPart[]
+    for (let j = content.length - 1; j >= 0 && recentCallIds.size < keepRecent; j--) {
+      const part = content[j]
+      if (part instanceof vscode.LanguageModelToolResultPart) {
+        recentCallIds.add(part.callId)
+      }
+    }
+  }
+
+  // 第二遍：替换所有不在"近期保留集合"中的 ToolResultPart 文本
+  let replacedCount = 0
+  let savedChars = 0
+  const result = messages.map((msg) => {
+    const content = msg.content as vscode.LanguageModelInputPart[]
+    let mutated = false
+
+    const newContent = content.map((part) => {
+      if (!(part instanceof vscode.LanguageModelToolResultPart)) return part
+      if (recentCallIds.has(part.callId)) return part
+
+      const totalText = sumToolResultTextLength(part)
+      if (totalText < minChars) return part
+
+      mutated = true
+      replacedCount++
+      savedChars += totalText - MICRO_COMPACT_TOOL_RESULT_STUB.length
+      return new vscode.LanguageModelToolResultPart(part.callId, [
+        new vscode.LanguageModelTextPart(MICRO_COMPACT_TOOL_RESULT_STUB),
+      ])
+    })
+
+    return mutated ? cloneMessageWithContent(msg, newContent) : msg
+  })
+
+  if (replacedCount > 0) {
+    log(`[Context] 微压缩：${replacedCount} 个旧工具结果，约节省 ${savedChars} 字符`)
+  }
+  return result
+}
+
+/** 累计单个 ToolResultPart 内所有 LanguageModelTextPart 的字符长度 */
+function sumToolResultTextLength(part: vscode.LanguageModelToolResultPart): number {
+  let total = 0
+  for (const inner of part.content) {
+    if (inner instanceof vscode.LanguageModelTextPart) {
+      total += inner.value.length
+    }
+  }
+  return total
+}
+
+/** 用新内容克隆一条 ChatMessage（保留 role；name 字段官方 API 不暴露读取，照搬 role 即可） */
+function cloneMessageWithContent(
+  original: vscode.LanguageModelChatMessage,
+  newContent: vscode.LanguageModelInputPart[],
+): vscode.LanguageModelChatMessage {
+  if (original.role === vscode.LanguageModelChatMessageRole.Assistant) {
+    return vscode.LanguageModelChatMessage.Assistant(
+      newContent as Array<vscode.LanguageModelTextPart | vscode.LanguageModelToolCallPart>,
+    )
+  }
+  // 默认 User（VS Code LM API 仅有 User / Assistant 两种角色）
+  return vscode.LanguageModelChatMessage.User(
+    newContent as Array<
+      | vscode.LanguageModelTextPart
+      | vscode.LanguageModelToolResultPart
+      | vscode.LanguageModelDataPart
+    >,
+  )
+}
+
+/**
+ * 在 LLM 摘要压缩前剥离图像 DataPart
+ *
+ * 摘要任务是纯文本归纳，图像送进去：
+ *   1. 浪费上下文（vision 模型对图像有显著 token 成本）
+ *   2. 大概率拖慢响应（多模态推理慢于纯文本）
+ *   3. 文本-only 模型直接报错
+ *
+ * 图像条目替换为简短文本占位（保留"曾经有图像"的语义信号）。
+ */
+function stripImagesForCompact(
+  messages: vscode.LanguageModelChatMessage[],
+): vscode.LanguageModelChatMessage[] {
+  if (!config.agent.stripImagesInCompact) return messages
+
+  return messages.map((msg) => {
+    const content = msg.content as vscode.LanguageModelInputPart[]
+    let mutated = false
+
+    const newContent: vscode.LanguageModelInputPart[] = []
+    for (const part of content) {
+      // 顶层 DataPart（罕见，但 API 允许）：直接替换为占位文本
+      if (part instanceof vscode.LanguageModelDataPart) {
+        mutated = true
+        newContent.push(new vscode.LanguageModelTextPart('[image omitted for summary]'))
+        continue
+      }
+      // ToolResultPart 内嵌的 DataPart：拆开重组，仅保留文本
+      if (part instanceof vscode.LanguageModelToolResultPart) {
+        let innerMutated = false
+        // ToolResultPart.content 类型签名包含 unknown，这里手动收窄为可构造类型
+        const filteredInner: unknown[] = []
+        for (const inner of part.content) {
+          if (inner instanceof vscode.LanguageModelDataPart) {
+            innerMutated = true
+            filteredInner.push(new vscode.LanguageModelTextPart('[image omitted for summary]'))
+          } else {
+            filteredInner.push(inner)
+          }
+        }
+        if (innerMutated) {
+          mutated = true
+          newContent.push(new vscode.LanguageModelToolResultPart(part.callId, filteredInner))
+        } else {
+          newContent.push(part)
+        }
+        continue
+      }
+      newContent.push(part)
+    }
+
+    return mutated ? cloneMessageWithContent(msg, newContent) : msg
+  })
+}
 
 /** 构建工作区上下文文本块（注入到 Prompt 层 3） */
 function buildWorkspaceContextBlock(wsCtx: WorkspaceContext): string {
@@ -252,9 +422,12 @@ async function compactHistoryWithLLM(
 ): Promise<vscode.LanguageModelChatMessage[]> {
   const adapter = getActiveAdapter()
 
+  // 摘要任务对图像无意义且代价高，先剥离 DataPart 再送给 LLM
+  const sanitized = stripImagesForCompact(messages)
+
   const compactRequest: vscode.LanguageModelChatMessage[] = [
     vscode.LanguageModelChatMessage.User(COMPACT_SYSTEM_PROMPT),
-    ...messages,
+    ...sanitized,
     vscode.LanguageModelChatMessage.User('Generate the summary in the format described above.'),
   ]
 

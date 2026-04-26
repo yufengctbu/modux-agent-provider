@@ -1,7 +1,7 @@
 import * as http from 'node:http'
 import * as https from 'node:https'
 import * as vscode from 'vscode'
-import type { ModuxTool } from '../types'
+import type { ModuxTool, ToolExecuteContext } from '../types'
 
 // ***
 // 工具：网页内容抓取
@@ -52,8 +52,9 @@ export const webFetchTool: ModuxTool = {
   isReadOnly: true,
   maxResultChars: MAX_RESPONSE_CHARS,
 
-  async execute(input: unknown, token: vscode.CancellationToken): Promise<string> {
+  async execute(input: unknown, ctx: ToolExecuteContext): Promise<string> {
     const { url } = input as WebFetchInput
+    const { token } = ctx
 
     // 基本 URL 格式校验
     let parsed: URL

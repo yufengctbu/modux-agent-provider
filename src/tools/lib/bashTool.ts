@@ -2,7 +2,7 @@ import { exec } from 'node:child_process'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
 import { config } from '../../config'
-import type { ModuxTool } from '../types'
+import type { ModuxTool, ToolExecuteContext } from '../types'
 
 // ***
 // 工具组：Shell 命令执行
@@ -50,8 +50,9 @@ export const runCommandTool: ModuxTool = {
   isReadOnly: false,
   maxResultChars: MAX_OUTPUT_CHARS,
 
-  async execute(input: unknown, token: vscode.CancellationToken): Promise<string> {
+  async execute(input: unknown, ctx: ToolExecuteContext): Promise<string> {
     const { command, cwd: relativeCwd } = input as RunCommandInput
+    const { token } = ctx
 
     const folders = vscode.workspace.workspaceFolders
     if (!folders || folders.length === 0) {

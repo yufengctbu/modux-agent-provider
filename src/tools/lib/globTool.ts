@@ -1,6 +1,6 @@
 import * as path from 'node:path'
 import * as vscode from 'vscode'
-import type { ModuxTool } from '../types'
+import type { ModuxTool, ToolExecuteContext } from '../types'
 
 // ***
 // 工具：文件路径发现
@@ -52,8 +52,9 @@ export const findFilesTool: ModuxTool = {
   },
   isReadOnly: true,
 
-  async execute(input: unknown, token: vscode.CancellationToken): Promise<string> {
+  async execute(input: unknown, ctx: ToolExecuteContext): Promise<string> {
     const { pattern, path: subPath } = input as FindFilesInput
+    const { token } = ctx
 
     const folders = vscode.workspace.workspaceFolders
     if (!folders || folders.length === 0) {

@@ -1,8 +1,9 @@
 import * as vscode from 'vscode'
 import { config } from '../config'
+import { fileStateCache } from '../shared/fileStateCache'
 import { log } from '../shared/logger'
 import { requestCommandPermission } from './permissions'
-import type { ModuxTool } from './types'
+import type { ModuxTool, ToolExecuteContext, ToolResult } from './types'
 
 // ***
 // ToolsManager — 工具注册、查找与执行的统一管理器
@@ -87,15 +88,20 @@ class ToolsManager {
   /**
    * 工具执行分发器
    *
-   * 流程：输入类型守卫 → 工具查找 → 权限检查（run_command）→ 执行 → 结果截断
+   * 流程：输入类型守卫 → 工具查找 → 权限检查（run_command）→ 执行 → 结果归一化与截断
    *
    * 失败时抛出异常（由 loop.ts 捕获并包装为 ToolResultPart 回传给 LLM）。
    *
    * @param name   工具名称（来自 LLM 的 LanguageModelToolCallPart.name）
    * @param input  工具调用参数（来自 LanguageModelToolCallPart.input）
    * @param token  VS Code 取消令牌
+   * @returns      已归一化为 ToolResult（始终带 text 字段，可选 attachments）
    */
-  async execute(name: string, input: unknown, token: vscode.CancellationToken): Promise<string> {
+  async execute(
+    name: string,
+    input: unknown,
+    token: vscode.CancellationToken,
+  ): Promise<ToolResult> {
     // 基础输入类型守卫（LLM 偶尔会发送非对象 input）
     if (typeof input !== 'object' || input === null) {
       throw new Error(`Tool "${name}" received invalid input type: ${typeof input}`)
@@ -114,20 +120,29 @@ class ToolsManager {
       const allowed = await requestCommandPermission(command)
       if (!allowed) {
         log(`[Tool] run_command 被用户拒绝：${command}`)
-        return `Command execution denied by user: \`${command}\``
+        return { text: `Command execution denied by user: \`${command}\`` }
       }
     }
 
-    const result = await tool.execute(input, token)
+    const ctx: ToolExecuteContext = { token, fileState: fileStateCache }
+    const raw = await tool.execute(input, ctx)
 
-    // 统一截断大输出（对应 Claude Code applyToolResultBudget）
+    // 归一化：纯文本结果包裹为 ToolResult
+    const normalized: ToolResult = typeof raw === 'string' ? { text: raw } : raw
+
+    // 统一截断超长 text（对应 Claude Code applyToolResultBudget）
     const limit = tool.maxResultChars ?? DEFAULT_TOOL_RESULT_MAX_CHARS
-    if (result.length > limit) {
-      log(`[Tool] ${name} 输出截断：${result.length} → ${limit} 字符`)
-      return result.slice(0, limit) + `\n... [Output truncated; exceeded ${limit} character limit]`
+    if (normalized.text.length > limit) {
+      log(`[Tool] ${name} 输出截断：${normalized.text.length} → ${limit} 字符`)
+      return {
+        text:
+          normalized.text.slice(0, limit) +
+          `\n... [Output truncated; exceeded ${limit} character limit]`,
+        attachments: normalized.attachments,
+      }
     }
 
-    return result
+    return normalized
   }
 
   /**

@@ -39,12 +39,18 @@ import rawConfig from './config.json'
  *     .timeoutMs    命令执行超时（毫秒）
  *
  * agent
- *   .systemPrompt           追加到 DEFAULT_SYSTEM_PROMPT 之后的自定义指令
- *   .language               响应语言（如 "Chinese (Simplified)"、"Japanese"）；留空时 AI 自行判断语言
- *   .maxLoopRounds          Agent Loop 单次任务最大循环轮次
- *   .compactThreshold       触发 LLM 历史摘要压缩的消息轮数阈值（优先路径）
- *   .maxHistoryTurns        摘要失败时的兜底硬截断轮数（应高于 compactThreshold）
- *   .compactHistoryEnabled  是否启用 LLM 摘要压缩（false 时直接截断）
+ *   .systemPrompt                      追加到 DEFAULT_SYSTEM_PROMPT 之后的自定义指令
+ *   .language                          响应语言（如 "Chinese (Simplified)"、"Japanese"）；留空时 AI 自行判断语言
+ *   .maxLoopRounds                     Agent Loop 单次任务最大循环轮次
+ *   .compactThreshold                  触发 LLM 历史摘要压缩的消息轮数阈值（优先路径）
+ *   .maxHistoryTurns                   摘要失败时的兜底硬截断轮数（应高于 compactThreshold）
+ *   .compactHistoryEnabled             是否启用 LLM 摘要压缩（false 时直接截断）
+ *   .fileReadDedupEnabled              read_file 命中相同文件 + 范围 + mtime 时返回 stub（默认 true）
+ *   .maxImageBytes                     单张图像最大字节数，超出则拒绝读取（默认 5 MB）
+ *   .microcompactEnabled               是否对历史中的旧 ToolResult 做微压缩（默认 true）
+ *   .microcompactKeepRecentToolResults 最近多少条 ToolResult 永远不压缩（默认 6）
+ *   .microcompactMinToolResultChars    单条 ToolResult 字符数低于此值时不压缩（默认 400）
+ *   .stripImagesInCompact              做 LLM 摘要压缩前是否剥离图像 DataPart（默认 true）
  */
 
 /** 递归只读类型，确保嵌套字段也不可写 */

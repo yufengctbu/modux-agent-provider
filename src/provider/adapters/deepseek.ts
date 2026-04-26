@@ -132,13 +132,39 @@ interface DeepSeekConfig {
   readonly baseUrl: string
   /** 是否验证 TLS 证书，默认 true；企业代理/自签证书环境可设为 false */
   readonly rejectUnauthorized: boolean
+  /**
+   * 模型是否支持视觉（multimodal input）。
+   * true  → 图像以 OpenAI 兼容的 image_url(data URL) 格式回传
+   * false → 图像剥离为简短文本占位，避免触发服务端 400
+   *
+   * DeepSeek 主流文本模型（chat / reasoner）当前不支持视觉，默认 false；
+   * 若使用 DeepSeek-VL 等视觉模型，可在 config.json 中显式置 true。
+   */
+  readonly supportsVision: boolean
 }
 
 // ── OpenAI 兼容消息格式 ────────────────────────────────────────────────────────
 
+/**
+ * OpenAI multimodal content part
+ *
+ * GPT-4V / Claude / DeepSeek-VL 等视觉模型统一使用此结构：
+ *   - 文本片段：{ type: 'text', text }
+ *   - 图像片段：{ type: 'image_url', image_url: { url: 'data:image/...;base64,...' } }
+ */
+type DeepSeekContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+
 interface DeepSeekMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
-  content: string | null
+  /**
+   * 消息内容
+   * - string：纯文本
+   * - DeepSeekContentPart[]：含图像的多模态内容（仅 user / tool 角色支持）
+   * - null：assistant 消息允许 content=null（仅 tool_calls）
+   */
+  content: string | DeepSeekContentPart[] | null
   /** thinking 模式下的 CoT 内容，多轮对话时须原样回传 */
   reasoning_content?: string
   tool_calls?: DeepSeekToolCall[]
@@ -245,9 +271,7 @@ class DeepSeekAdapter implements LlmAdapter {
 
     log(
       `[DeepSeek Adapter] 发起请求：model=${this.cfg.model}，messages=${messages.length}` +
-        (placeholderInjected
-          ? '（部分历史 reasoning_content 缺失，已注入占位符兜底）'
-          : ''),
+        (placeholderInjected ? '（部分历史 reasoning_content 缺失，已注入占位符兜底）' : ''),
     )
 
     let incoming: http.IncomingMessage
@@ -550,9 +574,7 @@ class DeepSeekAdapter implements LlmAdapter {
         const hasThinkingInHistory = thinkingPieces.length > 0
 
         const fingerprint =
-          toolCallInfos.length > 0
-            ? toolCallInfos.map((tc) => tc.callId).join(',')
-            : cleanText
+          toolCallInfos.length > 0 ? toolCallInfos.map((tc) => tc.callId).join(',') : cleanText
         const cacheHit = fingerprint ? this.reasoningCache.has(fingerprint) : false
         const cachedReasoning = cacheHit ? (this.reasoningCache.get(fingerprint) ?? '') : ''
 
@@ -596,29 +618,109 @@ class DeepSeekAdapter implements LlmAdapter {
           })
         }
       } else {
-        // User 角色：先展开工具结果为独立 tool 消息，再追加文本
+        // User 角色：先展开工具结果为独立 tool 消息，再追加文本（含可选图像）
         const toolResultMsgs: DeepSeekMessage[] = []
-        const userTexts: string[] = []
+        const userParts: DeepSeekContentPart[] = []
+        let userHasImage = false
 
         for (const p of parts) {
           const tr = extractToolResult(p)
           if (tr) {
-            const resultText = tr.content.map((inner) => extractText(inner) ?? '').join('')
-            toolResultMsgs.push({ role: 'tool', tool_call_id: tr.callId, content: resultText })
+            toolResultMsgs.push(this._buildToolResultMessage(tr.callId, tr.content))
+            continue
+          }
+          const img = extractImageDataPart(p)
+          if (img) {
+            if (this.cfg.supportsVision) {
+              userParts.push({
+                type: 'image_url',
+                image_url: { url: bufferToDataUrl(img.data, img.mimeType) },
+              })
+              userHasImage = true
+            } else {
+              userParts.push({
+                type: 'text',
+                text: `[image omitted: ${img.mimeType} (${img.data.byteLength} bytes); current model does not support vision input]`,
+              })
+            }
             continue
           }
           const tv = extractText(p)
-          if (tv !== undefined) userTexts.push(tv)
+          if (tv !== undefined) userParts.push({ type: 'text', text: tv })
         }
 
         result.push(...toolResultMsgs)
-        if (userTexts.length > 0) {
-          result.push({ role: 'user', content: userTexts.join('') })
+        if (userParts.length > 0) {
+          // 全是文本时序列化为 string，节省服务端解析；含图像时保留数组结构
+          if (!userHasImage) {
+            result.push({
+              role: 'user',
+              content: userParts.map((p) => (p.type === 'text' ? p.text : '')).join(''),
+            })
+          } else {
+            result.push({ role: 'user', content: userParts })
+          }
         }
       }
     }
 
     return { messages: result, placeholderInjected }
+  }
+
+  /**
+   * 构造一条 role:tool 消息（对应 LanguageModelToolResultPart）
+   *
+   * 工具结果由 loop.ts 包成 [TextPart, DataPart...]，其中：
+   *   - TextPart 始终存在，是工具的纯文本表述
+   *   - DataPart 仅当工具返回了图像（read_file 读图）时存在
+   *
+   * 序列化策略：
+   *   - 模型支持视觉 → 保留图像，content 用数组形式
+   *   - 模型不支持视觉 → 剥离图像，content 用字符串形式（追加一行说明，让 LLM 知道有图但看不到）
+   *
+   * 注意：OpenAI 规范中 role:tool 的 content 仅明确支持 string；多模态 tool content
+   * 是较新的扩展（GPT-4o / Anthropic 已支持，DeepSeek-VL 待验证）。当前实现保守地
+   * 在 supportsVision=true 时尝试发送数组，由服务端兜底。
+   */
+  private _buildToolResultMessage(callId: string, content: unknown[]): DeepSeekMessage {
+    const textChunks: string[] = []
+    const imageParts: DeepSeekContentPart[] = []
+    let strippedImages = 0
+
+    for (const inner of content) {
+      const tv = extractText(inner)
+      if (tv !== undefined) {
+        textChunks.push(tv)
+        continue
+      }
+      const img = extractImageDataPart(inner)
+      if (img) {
+        if (this.cfg.supportsVision) {
+          imageParts.push({
+            type: 'image_url',
+            image_url: { url: bufferToDataUrl(img.data, img.mimeType) },
+          })
+        } else {
+          strippedImages++
+        }
+      }
+    }
+
+    if (this.cfg.supportsVision && imageParts.length > 0) {
+      const parts: DeepSeekContentPart[] = []
+      const text = textChunks.join('')
+      if (text.length > 0) parts.push({ type: 'text', text })
+      parts.push(...imageParts)
+      return { role: 'tool', tool_call_id: callId, content: parts }
+    }
+
+    let text = textChunks.join('')
+    if (strippedImages > 0) {
+      text +=
+        (text.length > 0 ? '\n\n' : '') +
+        `[${strippedImages} image attachment(s) omitted: current model does not support vision input]`
+    }
+    return { role: 'tool', tool_call_id: callId, content: text }
   }
 }
 
@@ -655,6 +757,44 @@ function extractToolCall(p: unknown): { callId: string; name: string; input: unk
     return { callId: obj.callId, name: obj.name, input: obj.input }
   }
   return undefined
+}
+
+/**
+ * 提取图像 DataPart 信息
+ *
+ * 兼容 LanguageModelDataPart 实例和 IPC 反序列化后的 plain object。
+ * 仅识别 mimeType 以 image/ 开头的 part，避免误吞其他 binary 数据。
+ */
+function extractImageDataPart(p: unknown): { data: Uint8Array; mimeType: string } | undefined {
+  if (p instanceof vscode.LanguageModelDataPart) {
+    if (typeof p.mimeType === 'string' && p.mimeType.startsWith('image/')) {
+      return { data: p.data, mimeType: p.mimeType }
+    }
+    return undefined
+  }
+  const obj = p as Record<string, unknown>
+  if (
+    obj &&
+    typeof obj.mimeType === 'string' &&
+    obj.mimeType.startsWith('image/') &&
+    obj.data instanceof Uint8Array
+  ) {
+    return { data: obj.data, mimeType: obj.mimeType }
+  }
+  return undefined
+}
+
+/**
+ * 把二进制图像数据编码为 OpenAI 兼容的 data URL
+ *
+ * 形如 `data:image/png;base64,iVBORw0K...`
+ *
+ * 注意：base64 编码会让数据膨胀 ~33%。调用前请确保图像大小已被 imageReader
+ * 在源头护栏过（默认 5 MB），避免一次请求体过大被服务端截断。
+ */
+function bufferToDataUrl(data: Uint8Array, mimeType: string): string {
+  const base64 = Buffer.from(data).toString('base64')
+  return `data:${mimeType};base64,${base64}`
 }
 
 /**
@@ -708,7 +848,8 @@ const factory: LlmAdapterFactory = {
     const model = typeof cfg.model === 'string' ? cfg.model : 'deepseek-v4-flash'
     const baseUrl = typeof cfg.baseUrl === 'string' ? cfg.baseUrl : 'https://api.deepseek.com'
     const rejectUnauthorized = cfg.rejectUnauthorized !== false // 默认 true
-    return new DeepSeekAdapter({ apiKey, model, baseUrl, rejectUnauthorized })
+    const supportsVision = cfg.supportsVision === true // 默认 false（DeepSeek 主流模型无视觉）
+    return new DeepSeekAdapter({ apiKey, model, baseUrl, rejectUnauthorized, supportsVision })
   },
 }
 

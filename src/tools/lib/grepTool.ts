@@ -1,6 +1,6 @@
 import * as fs from 'node:fs/promises'
 import * as vscode from 'vscode'
-import type { ModuxTool } from '../types'
+import type { ModuxTool, ToolExecuteContext } from '../types'
 
 // ***
 // 工具组：代码搜索
@@ -106,8 +106,9 @@ export const searchCodeTool: ModuxTool = {
   isReadOnly: true,
   maxResultChars: CONTENT_MODE_MAX_CHARS,
 
-  async execute(input: unknown, token: vscode.CancellationToken): Promise<string> {
+  async execute(input: unknown, ctx: ToolExecuteContext): Promise<string> {
     const { pattern, glob, outputMode = 'files_with_matches' } = input as SearchCodeInput
+    const { token } = ctx
 
     // 编译正则（全局标志确保每行可以重复匹配）
     let regex: RegExp

@@ -260,14 +260,9 @@ async function executeSingleTool(
   stream.progress(`调用工具：${call.name}`)
 
   try {
-    const resultText = await toolsManager.execute(call.name, call.input, token)
+    const result = await toolsManager.execute(call.name, call.input, token)
     log(`[Loop] 工具 ${call.name} 执行成功`)
-    return [
-      index,
-      new vscode.LanguageModelToolResultPart(call.callId, [
-        new vscode.LanguageModelTextPart(resultText),
-      ]),
-    ]
+    return [index, buildToolResultPart(call.callId, result)]
   } catch (err) {
     // 工具失败：回传错误信息，让 LLM 决定如何处理
     const errMsg = err instanceof Error ? err.message : String(err)
@@ -279,6 +274,32 @@ async function executeSingleTool(
       ]),
     ]
   }
+}
+
+/**
+ * 把工具结果（含可选附件）封装为 LanguageModelToolResultPart
+ *
+ * 文本部分恒存在；附件按类型转成对应的 Part：
+ *   - image → LanguageModelDataPart.image(uint8, mime)
+ *
+ * 不支持视觉的下游 adapter 在序列化时会自行剥离 DataPart，
+ * 这里只负责把通用结构构造出来。
+ */
+function buildToolResultPart(
+  callId: string,
+  result: import('../tools/types').ToolResult,
+): vscode.LanguageModelToolResultPart {
+  const parts: Array<vscode.LanguageModelTextPart | vscode.LanguageModelDataPart> = [
+    new vscode.LanguageModelTextPart(result.text),
+  ]
+
+  for (const attachment of result.attachments ?? []) {
+    if (attachment.kind === 'image') {
+      parts.push(vscode.LanguageModelDataPart.image(attachment.data, attachment.mimeType))
+    }
+  }
+
+  return new vscode.LanguageModelToolResultPart(callId, parts)
 }
 
 // ── 工具批次分组 ──────────────────────────────────────────────────────────────

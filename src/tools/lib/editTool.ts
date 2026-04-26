@@ -1,5 +1,5 @@
 import * as fs from 'node:fs/promises'
-import type { ModuxTool } from '../types'
+import type { ModuxTool, ToolExecuteContext } from '../types'
 import { resolveWorkspacePath } from '../utils'
 
 // ***
@@ -55,7 +55,7 @@ export const editFileTool: ModuxTool = {
   isReadOnly: false,
   maxResultChars: 2000,
 
-  async execute(input: unknown): Promise<string> {
+  async execute(input: unknown, ctx: ToolExecuteContext): Promise<string> {
     const { file_path, old_string, new_string, replace_all = false } = input as EditFileInput
 
     const resolved = resolveWorkspacePath(file_path)
@@ -97,6 +97,8 @@ export const editFileTool: ModuxTool = {
       const msg = err instanceof Error ? err.message : String(err)
       return `Failed to write file "${file_path}": ${msg}`
     }
+
+    ctx.fileState.invalidate(resolved)
 
     // ── 返回变更周边上下文，供 LLM 验证 ──────────────────────────────────────
     const replacedCount = replace_all ? occurrences : 1

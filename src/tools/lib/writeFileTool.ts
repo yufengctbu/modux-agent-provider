@@ -1,6 +1,6 @@
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
-import type { ModuxTool } from '../types'
+import type { ModuxTool, ToolExecuteContext } from '../types'
 import { resolveWorkspacePath } from '../utils'
 
 // ***
@@ -34,7 +34,7 @@ export const writeFileTool: ModuxTool = {
   },
   isReadOnly: false,
 
-  async execute(input: unknown): Promise<string> {
+  async execute(input: unknown, ctx: ToolExecuteContext): Promise<string> {
     const { path: filePath, content } = input as WriteFileInput
 
     const resolved = resolveWorkspacePath(filePath)
@@ -48,6 +48,8 @@ export const writeFileTool: ModuxTool = {
       const msg = err instanceof Error ? err.message : String(err)
       return `Failed to write file "${filePath}": ${msg}`
     }
+
+    ctx.fileState.invalidate(resolved)
 
     return `OK: Wrote "${filePath}" (${content.length} characters).`
   },

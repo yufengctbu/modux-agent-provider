@@ -1,5 +1,5 @@
 import * as vscode from 'vscode'
-import type { ModuxTool } from '../types'
+import type { ModuxTool, ToolExecuteContext } from '../types'
 
 // ***
 // 工具：向用户提问
@@ -50,8 +50,9 @@ export const askUserTool: ModuxTool = {
   },
   isReadOnly: true,
 
-  async execute(input: unknown, token: vscode.CancellationToken): Promise<string> {
+  async execute(input: unknown, ctx: ToolExecuteContext): Promise<string> {
     const { question, options } = input as AskUserInput
+    const { token } = ctx
 
     // 有选项：用 QuickPick（点选 + 自由输入兜底）
     if (options && options.length > 0) {

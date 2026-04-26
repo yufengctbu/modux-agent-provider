@@ -1,5 +1,5 @@
 import { log } from '../../shared/logger'
-import type { ModuxTool } from '../types'
+import type { ModuxTool, ToolExecuteContext } from '../types'
 
 // ***
 // 工具：会话任务清单
@@ -99,7 +99,7 @@ export const todoWriteTool: ModuxTool = {
   },
   isReadOnly: false,
 
-  async execute(input: unknown): Promise<string> {
+  async execute(input: unknown, _ctx: ToolExecuteContext): Promise<string> {
     const { todos } = input as TodoWriteInput
 
     // 基本校验：in_progress 不超过 1 个

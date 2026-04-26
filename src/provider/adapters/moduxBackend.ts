@@ -26,14 +26,29 @@ const CHARS_PER_TOKEN = 4
 interface ModuxBackendConfig {
   readonly url: string
   readonly forwardTools: boolean
+  /**
+   * 是否把图像 DataPart 序列化为 OpenAI 兼容的 image_url(data URL) 格式
+   * 转发给后端。
+   *
+   * true  → message.content 改为多模态数组 [{type:'text'}, {type:'image_url'}]
+   * false → 图像位置保留一行 "[image: ...]" 文本占位（默认）
+   *
+   * 用户后端不支持视觉时保持默认 false，避免 base64 数据膨胀和后端 4xx。
+   */
+  readonly forwardImages: boolean
 }
 
 // ── 后端请求 / 响应类型 ───────────────────────────────────────────────────────
 
-/** 发往后端的单条消息（简化 OpenAI 格式） */
+/** OpenAI 多模态 content part（仅 forwardImages=true 时使用） */
+type BackendContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+
+/** 发往后端的单条消息（OpenAI 兼容） */
 interface BackendMessage {
   role: 'user' | 'assistant'
-  content: string
+  content: string | BackendContentPart[]
 }
 
 /** 发往后端的请求体 */
@@ -90,7 +105,9 @@ class ModuxBackendAdapter implements LlmAdapter {
     const body: BackendRequestBody = {
       messages: req.messages.map((m) => ({
         role: m.role === vscode.LanguageModelChatMessageRole.User ? 'user' : 'assistant',
-        content: serializeMessageContent(m.content as vscode.LanguageModelInputPart[]),
+        content: this.cfg.forwardImages
+          ? serializeMessageContentMultimodal(m.content as vscode.LanguageModelInputPart[])
+          : serializeMessageContent(m.content as vscode.LanguageModelInputPart[]),
       })),
     }
 
@@ -211,15 +228,101 @@ function serializeMessageContent(content: readonly vscode.LanguageModelInputPart
       const inputStr = typeof part.input === 'string' ? part.input : JSON.stringify(part.input)
       parts.push(`[Tool Call: ${part.name}(${inputStr})]`)
     } else if (part instanceof vscode.LanguageModelToolResultPart) {
-      const resultText = part.content
-        .filter((p): p is vscode.LanguageModelTextPart => p instanceof vscode.LanguageModelTextPart)
-        .map((p) => p.value)
-        .join('')
-      parts.push(`[Tool Result: ${resultText}]`)
+      // 工具结果：拼接文本片段；图像片段降级为占位
+      const innerChunks: string[] = []
+      for (const inner of part.content) {
+        if (inner instanceof vscode.LanguageModelTextPart) {
+          innerChunks.push(inner.value)
+        } else if (inner instanceof vscode.LanguageModelDataPart) {
+          innerChunks.push(`[image: ${inner.mimeType}, ${inner.data.byteLength} bytes]`)
+        }
+      }
+      parts.push(`[Tool Result: ${innerChunks.join('')}]`)
+    } else if (part instanceof vscode.LanguageModelDataPart) {
+      // 顶层 DataPart：罕见但合法（用户消息直接附图），降级为占位
+      parts.push(`[image: ${part.mimeType}, ${part.data.byteLength} bytes]`)
     }
   }
 
   return parts.join('\n')
+}
+
+/**
+ * 序列化消息内容为 OpenAI 多模态格式（forwardImages=true 时使用）
+ *
+ * 仅当消息中真的包含图像时返回数组；否则降级为 string，
+ * 避免不必要地把后端切到多模态解析路径。
+ *
+ * 工具调用 / 工具结果一律降级为文本占位（保持与后端的简单契约）。
+ */
+function serializeMessageContentMultimodal(
+  content: readonly vscode.LanguageModelInputPart[],
+): string | BackendContentPart[] {
+  const out: BackendContentPart[] = []
+  let hasImage = false
+
+  const pushText = (text: string) => {
+    if (!text) return
+    const last = out[out.length - 1]
+    // 相邻文本合并，避免数组膨胀
+    if (last && last.type === 'text') {
+      last.text += text
+    } else {
+      out.push({ type: 'text', text })
+    }
+  }
+
+  for (const part of content) {
+    if (part instanceof vscode.LanguageModelTextPart) {
+      pushText(part.value)
+    } else if (part instanceof vscode.LanguageModelToolCallPart) {
+      const inputStr = typeof part.input === 'string' ? part.input : JSON.stringify(part.input)
+      pushText(`\n[Tool Call: ${part.name}(${inputStr})]`)
+    } else if (part instanceof vscode.LanguageModelToolResultPart) {
+      const innerChunks: string[] = []
+      for (const inner of part.content) {
+        if (inner instanceof vscode.LanguageModelTextPart) {
+          innerChunks.push(inner.value)
+        } else if (inner instanceof vscode.LanguageModelDataPart) {
+          if (inner.mimeType.startsWith('image/')) {
+            // 工具内嵌图像：直接以 image_url 形式回传
+            pushText(`\n[Tool Result: ${innerChunks.join('')}]\n`)
+            innerChunks.length = 0
+            out.push({
+              type: 'image_url',
+              image_url: { url: bufferToDataUrl(inner.data, inner.mimeType) },
+            })
+            hasImage = true
+          }
+        }
+      }
+      if (innerChunks.length > 0) {
+        pushText(`\n[Tool Result: ${innerChunks.join('')}]`)
+      }
+    } else if (part instanceof vscode.LanguageModelDataPart) {
+      if (part.mimeType.startsWith('image/')) {
+        out.push({
+          type: 'image_url',
+          image_url: { url: bufferToDataUrl(part.data, part.mimeType) },
+        })
+        hasImage = true
+      }
+    }
+  }
+
+  if (!hasImage) {
+    return out.map((p) => (p.type === 'text' ? p.text : '')).join('')
+  }
+  return out
+}
+
+/**
+ * 把图像字节编码为 data URL（OpenAI 多模态规范）
+ *
+ * base64 让数据膨胀 ~33%，建议在源头（imageReader.maxBytes）做大小护栏。
+ */
+function bufferToDataUrl(data: Uint8Array, mimeType: string): string {
+  return `data:${mimeType};base64,${Buffer.from(data).toString('base64')}`
 }
 
 // ── 工厂自注册 ────────────────────────────────────────────────────────────────
@@ -232,7 +335,8 @@ const factory: LlmAdapterFactory = {
       throw new Error('moduxBackend 适配器缺少必填字段：url')
     }
     const forwardTools = cfg.forwardTools === true
-    return new ModuxBackendAdapter({ url, forwardTools })
+    const forwardImages = cfg.forwardImages === true // 默认 false（用户后端通常不支持视觉）
+    return new ModuxBackendAdapter({ url, forwardTools, forwardImages })
   },
 }
 
