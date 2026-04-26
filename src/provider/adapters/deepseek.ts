@@ -28,12 +28,16 @@ import type { LlmAdapter, LlmAdapterFactory, LlmChatRequest } from '../types'
 //   - 注意：thinking:{type:'disabled'} 只控制本轮输出是否包含 reasoning_content，
 //     **无法绕过服务端对历史消息合法性的校验**——历史里旧的 tool_calls assistant
 //     仍要求带 reasoning_content 字段
+//   - 文档说"未进行工具调用的中间 assistant 的 reasoning_content 会被忽略"，
+//     但实测在 V4 上只要上下文里夹着 thinking 模式产生的消息，整段会被当作
+//     "思考模式上下文"做完整性校验，缺字段也可能触发 400。所以这里采取**最保守**
+//     的策略：**所有** assistant 消息都强制带非空 reasoning_content（含纯文本）。
 //
 // reasoning_content 三层来源（优先级递减）：
 //   1. 历史消息中携带的 LanguageModelThinkingPart（VS Code/Cursor 多轮保留）
 //   2. 内存 reasoningCache（本进程生命周期内按 callId 指纹缓存）
 //   3. MISSING_REASONING_PLACEHOLDER 兜底（扩展重启或会话跨边界等场景）
-// 始终保证 tool_calls assistant 的 reasoning_content 字段非空，避开 400 校验。
+// 始终保证**任何** assistant 的 reasoning_content 字段非空，彻底避开 400 校验。
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** 估算 token 数的字符/token 比例 */
@@ -513,15 +517,15 @@ class DeepSeekAdapter implements LlmAdapter {
    *   - 纯文本消息            → content 字段
    *   - 旧版 HTML marker 思考块（早期实现遗留）从 content 中剥离，避免重复
    *
-   * tool_calls assistant 的 reasoning_content **始终注入**（DeepSeek 强制要求），
+   * **所有** assistant（含纯文本）的 reasoning_content **始终注入非空值**，
    * 三层来源优先级：
    *   1. 历史消息中的 LanguageModelThinkingPart（VS Code/Cursor 在多轮中保留）
-   *   2. 内存缓存（按 callId 指纹）
+   *   2. 内存缓存（按 callId 指纹 / 文本指纹）
    *   3. MISSING_REASONING_PLACEHOLDER 占位字符串（前两者都缺失时）
    *
-   * 纯文本 assistant（无 tool_calls）：
-   *   - 文档明确写明 reasoning_content 在此场景下"会被忽略"
-   *   - 仅当本地能提供（ThinkingPart 或缓存命中）时回传，否则省略
+   * 之所以纯文本 assistant 也强制带：DeepSeek 文档说该场景"会被忽略"，但 V4
+   * 实测只要上下文里有 thinking 模式产生的消息，整段会被当作思考模式上下文
+   * 做完整性校验，缺字段也可能触发 400。最保守做法是统一兜底。
    *
    * 容错策略：
    *   - 内容 part 同时支持 class 实例（instanceof）和 plain object（鸭子类型）
@@ -578,19 +582,20 @@ class DeepSeekAdapter implements LlmAdapter {
         const cacheHit = fingerprint ? this.reasoningCache.has(fingerprint) : false
         const cachedReasoning = cacheHit ? (this.reasoningCache.get(fingerprint) ?? '') : ''
 
-        if (toolCallInfos.length > 0) {
-          // tool_calls assistant：reasoning_content 字段必须存在且非空，
-          // 否则 DeepSeek API 直接 400
-          let reasoningContent: string
-          if (hasThinkingInHistory && thinkingFromHistory.length > 0) {
-            reasoningContent = thinkingFromHistory
-          } else if (cacheHit && cachedReasoning.length > 0) {
-            reasoningContent = cachedReasoning
-          } else {
-            reasoningContent = MISSING_REASONING_PLACEHOLDER
-            placeholderInjected = true
-          }
+        // 所有 assistant 消息（含纯文本）统一三层兜底，保证 reasoning_content 非空。
+        // 详见文件头注释；这里不再区分 tool_calls / 纯文本——文档说纯文本的
+        // reasoning_content 会被忽略，传入是无害的，缺字段反而可能 400。
+        let reasoningContent: string
+        if (hasThinkingInHistory && thinkingFromHistory.length > 0) {
+          reasoningContent = thinkingFromHistory
+        } else if (cacheHit && cachedReasoning.length > 0) {
+          reasoningContent = cachedReasoning
+        } else {
+          reasoningContent = MISSING_REASONING_PLACEHOLDER
+          placeholderInjected = true
+        }
 
+        if (toolCallInfos.length > 0) {
           result.push({
             role: 'assistant',
             content: cleanText.length > 0 ? cleanText : null,
@@ -605,16 +610,10 @@ class DeepSeekAdapter implements LlmAdapter {
             })),
           })
         } else {
-          // 纯文本 assistant：服务端对此场景的 reasoning_content 是可选的
-          // （文档明确说明"在两个 user 消息之间，如果模型未进行工具调用，则
-          // 中间 assistant 的 reasoning_content 无需参与上下文拼接，传入会
-          // 被忽略"），仅当能从本地提供时回传，避免污染上下文
-          const hasLocalReasoning = hasThinkingInHistory || cacheHit
-          const reasoning = hasThinkingInHistory ? thinkingFromHistory : cachedReasoning
           result.push({
             role: 'assistant',
             content: cleanText,
-            ...(hasLocalReasoning ? { reasoning_content: reasoning } : {}),
+            reasoning_content: reasoningContent,
           })
         }
       } else {
