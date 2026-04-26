@@ -26,6 +26,9 @@
   "activationEvents": [
     "onStartupFinished"
   ],
+  "enabledApiProposals": [
+    "languageModelThinkingPart"
+  ],
   "main": "./dist/extension.cjs",
   "contributes": {
     "chatParticipants": [

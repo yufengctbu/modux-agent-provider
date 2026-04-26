@@ -24,34 +24,106 @@ import type { LlmAdapter, LlmAdapterFactory, LlmChatRequest } from '../types'
 //
 // 思考模式契约（详见 https://api-docs.deepseek.com/zh-cn/guides/thinking_mode）：
 //   - 两个 user 消息之间，若 assistant 进行了工具调用，则该 assistant 的
-//     reasoning_content 必须在后续所有请求中回传给 API，否则 400
-//   - 本适配器以 callId 指纹为 key 把 reasoning_content 缓存在内存中，下一轮
-//     转换消息时回填到对应 assistant 上
-//   - 缓存失败的兜底：检测到任意带 tool_calls 的 assistant 缺失 reasoning_content
-//     时，对该请求显式 thinking:disabled，避开服务端校验，保留完整历史
+//     reasoning_content **必须** 在后续所有请求中回传给 API，否则 400
+//   - 注意：thinking:{type:'disabled'} 只控制本轮输出是否包含 reasoning_content，
+//     **无法绕过服务端对历史消息合法性的校验**——历史里旧的 tool_calls assistant
+//     仍要求带 reasoning_content 字段
+//
+// reasoning_content 三层来源（优先级递减）：
+//   1. 历史消息中携带的 LanguageModelThinkingPart（VS Code/Cursor 多轮保留）
+//   2. 内存 reasoningCache（本进程生命周期内按 callId 指纹缓存）
+//   3. MISSING_REASONING_PLACEHOLDER 兜底（扩展重启或会话跨边界等场景）
+// 始终保证 tool_calls assistant 的 reasoning_content 字段非空，避开 400 校验。
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** 估算 token 数的字符/token 比例 */
 const CHARS_PER_TOKEN = 4
 
-// ── 思考块（reasoning_content）UI 渲染包装 ─────────────────────────────────────
+// ── 思考块（reasoning_content）UI 渲染 ─────────────────────────────────────────
 //
-// 把 reasoning_content 流式渲染为 markdown <details> 折叠块，在 VS Code Chat 面板
-// 中显示为"💭 思考"区域。两侧夹 HTML 注释 sentinel：
-//   - 渲染时不可见，对 UI 透明
-//   - toDeepSeekMessages 据此把整段思考块从历史 content 中剥离，避免与
-//     reasoning_content 字段重复发送给 API
+// 通过 VS Code proposed API LanguageModelThinkingPart 把 reasoning_content 流式
+// 回传给 Chat 面板（VS Code / Cursor），UI 渲染为"正在推理"灰色状态条，与
+// Copilot 官方一致。模式参考 vscode-copilot-chat languageModelAccess.ts：
+//   - 出现 reasoning 增量：progress.report(new LanguageModelThinkingPart(text, id, meta))
+//   - 转入正文/工具调用时：progress.report(new LanguageModelThinkingPart('', '', { vscode_reasoning_done: true }))
 //
-// 注：DeepSeek 文档明确，reasoning_content 须通过同名字段（非 content）回传，
-// 详见 https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
+// 兼容策略：未启用 proposed API 或运行环境不支持时，constructor 返回 undefined，
+// adapter 不 yield 思考 part，仅维护内存缓存保证多轮 reasoning_content 一致。
+//
+// 历史中的 LanguageModelThinkingPart：toDeepSeekMessages 优先从中提取
+// reasoning_content（VS Code Stable 1.95+ / Cursor 在多轮对话中会原样保留它），
+// 缓存退化为兜底来源。
+//
+// DeepSeek thinking 模式契约见 https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
 
-const REASONING_OPEN_MARKER =
-  '\n\n<!--MODUX_REASONING_START--><details open><summary>💭 思考</summary>\n\n'
-const REASONING_CLOSE_MARKER = '\n\n</details><!--MODUX_REASONING_END-->\n\n'
+/**
+ * 兼容 vscode.LanguageModelThinkingPart 在某些宿主下不可用的情况。
+ * 不可用时返回 undefined，调用侧需做空值兜底。
+ */
+function getThinkingPartCtor():
+  | (typeof vscode.LanguageModelThinkingPart & {
+      new (
+        value: string | string[],
+        id?: string,
+        metadata?: { readonly [key: string]: unknown },
+      ): vscode.LanguageModelThinkingPart
+    })
+  | undefined {
+  const v = vscode as unknown as { LanguageModelThinkingPart?: unknown }
+  return typeof v.LanguageModelThinkingPart === 'function'
+    ? (v.LanguageModelThinkingPart as never)
+    : undefined
+}
 
-/** 用于从 assistant 文本中剔除思考块的正则；非贪婪匹配，吞噬两侧空白 */
-const REASONING_BLOCK_PATTERN =
+/**
+ * 从 assistant 消息内容中提取 LanguageModelThinkingPart 的文本（如果存在）。
+ * 用于多轮对话时把上一轮的思考内容回传给 DeepSeek API（reasoning_content 字段）。
+ */
+function extractThinkingPartText(part: unknown): string | undefined {
+  const ctor = getThinkingPartCtor()
+  if (ctor && part instanceof ctor) {
+    const v = (part as vscode.LanguageModelThinkingPart).value
+    return Array.isArray(v) ? v.join('') : v
+  }
+  // 鸭子类型兜底（IPC 序列化后 instanceof 可能失效）
+  const obj = part as { value?: unknown; id?: unknown; metadata?: unknown }
+  if (
+    obj &&
+    typeof obj === 'object' &&
+    (typeof obj.value === 'string' || Array.isArray(obj.value)) &&
+    // ThinkingPart 至少要有 metadata 或 id 之一以区别于普通 TextPart
+    (obj.id !== undefined || obj.metadata !== undefined) &&
+    !('callId' in obj) // 排除 ToolCallPart
+  ) {
+    return Array.isArray(obj.value) ? obj.value.join('') : obj.value
+  }
+  return undefined
+}
+
+/**
+ * 旧版（HTML marker）思考块兼容剥离正则。
+ *
+ * 历史背景：早期版本曾把 reasoning 包成 <details> + HTML 注释 sentinel 直接塞进
+ * TextPart，会污染 assistant 历史 content。升级到 ThinkingPart 后，旧的会话
+ * 历史里仍可能残留这种文本，多轮回传给 API 会和 reasoning_content 字段重复。
+ * 这里保留剥离逻辑做向后兼容，纯新增对话不会触发。
+ */
+const LEGACY_REASONING_BLOCK_PATTERN =
   /\s*<!--MODUX_REASONING_START-->[\s\S]*?<!--MODUX_REASONING_END-->\s*/g
+
+/**
+ * 当 ThinkingPart 与 reasoningCache 都没法提供 reasoning_content 时的占位符。
+ *
+ * 触发场景（必须保证字段非空，否则 DeepSeek 服务端 400）：
+ *   - 扩展重启 / 内存缓存被清空，且历史消息没有 ThinkingPart
+ *   - 跨会话边界（旧版本生成的 tool_calls assistant 没有原始 reasoning）
+ *   - VS Code 接收侧未保留 ThinkingPart 的少数边缘情况
+ *
+ * 用人类可读的明确文本，让模型一眼看出是丢失的占位（而非真正的思考），
+ * 同时满足服务端"非空字符串"校验。
+ */
+const MISSING_REASONING_PLACEHOLDER =
+  '(historical reasoning_content unavailable — a previous turn produced this tool call but its reasoning was not preserved across the session boundary; treat the assistant message and its tool result as ground truth and continue)'
 
 /** DeepSeek 适配器配置（来自 config.llms 中 type=deepseek 的条目） */
 interface DeepSeekConfig {
@@ -157,23 +229,25 @@ class DeepSeekAdapter implements LlmAdapter {
       throw new Error('DeepSeek 适配器未配置 apiKey，请在 config.json 中填写 deepseek.apiKey')
     }
 
-    const { messages, hasMissingReasoning } = this.toDeepSeekMessages(req.messages)
+    const { messages, placeholderInjected } = this.toDeepSeekMessages(req.messages)
     const tools = req.tools.length > 0 ? toDeepSeekTools(req.tools) : undefined
 
-    // 当历史中存在带 tool_calls 但缺失 reasoning_content 的 assistant 消息时，
-    // 显式关闭思考模式，让服务端跳过 reasoning_content 必填校验，避免 400。
-    // 文档参考：https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
+    // 注意：DeepSeek 服务端对带 tool_calls 的历史 assistant 消息强制要求
+    // reasoning_content 字段非空，且这一校验**与本轮 thinking 开关无关**。
+    // 因此不能用 thinking:{type:'disabled'} 绕过，必须由 toDeepSeekMessages
+    // 在转换阶段保证字段恒在（缺失时用 MISSING_REASONING_PLACEHOLDER 兜底）。
     const body = JSON.stringify({
       model: this.cfg.model,
       messages,
       ...(tools ? { tools } : {}),
       stream: true,
-      ...(hasMissingReasoning ? { thinking: { type: 'disabled' } } : {}),
     })
 
     log(
       `[DeepSeek Adapter] 发起请求：model=${this.cfg.model}，messages=${messages.length}` +
-        (hasMissingReasoning ? '，thinking=disabled（reasoning_content 缓存缺失，降级）' : ''),
+        (placeholderInjected
+          ? '（部分历史 reasoning_content 缺失，已注入占位符兜底）'
+          : ''),
     )
 
     let incoming: http.IncomingMessage
@@ -282,14 +356,21 @@ class DeepSeekAdapter implements LlmAdapter {
   }
 
   /**
-   * 解析 SSE 流：实时 yield 文本片段，同时将工具调用块累积到 partialCalls
+   * 解析 SSE 流：实时 yield 文本/思考片段，同时将工具调用块累积到 partialCalls
    *
-   * 思考流处理（v2）：reasoning_content 实时 yield 为 TextPart，前后用
-   * REASONING_OPEN/CLOSE_MARKER 夹紧，UI 渲染为 <details> 折叠块；
-   * toDeepSeekMessages 在下一轮序列化时按 marker 把整段思考块从 content 剥离。
+   * 思考流处理（v3，对齐 Copilot 官方）：reasoning_content 增量包成
+   * LanguageModelThinkingPart 直接 yield；转入正文或工具调用时 yield 一个
+   * vscode_reasoning_done 标记的 thinking part 表示思考段结束（与
+   * vscode-copilot-chat languageModelAccess.ts:687-699 一致）。
+   *
+   * 当宿主未提供 LanguageModelThinkingPart 时静默跳过 yield，仅写入
+   * reasoningOut 维持缓存一致性。
+   *
+   * 返回类型用 unknown 通配（标准 LanguageModelResponsePart 是 union，不含
+   * proposed 的 ThinkingPart；运行时 progress.report / for-await 都能接收）。
    *
    * @param reasoningOut 输出参数：累积的 reasoning_content（用于缓存原文）
-   * @param textOut      输出参数：累积的"非思考"文本片段（用于指纹计算）
+   * @param textOut      输出参数：累积的文本片段（用于指纹计算）
    */
   private async *readSseStream(
     stream: http.IncomingMessage,
@@ -298,13 +379,29 @@ class DeepSeekAdapter implements LlmAdapter {
     partialCalls: Map<number, PartialToolCall>,
     reasoningOut: { content: string },
     textOut: string[],
-  ): AsyncIterable<vscode.LanguageModelTextPart> {
+  ): AsyncIterable<vscode.LanguageModelResponsePart> {
     const decoder = new TextDecoder()
     let leftover = '' // 跨 chunk 的不完整行缓存
 
-    /** 思考块开闭状态。一次响应内只有一段思考块（最多一对 open/close） */
-    let reasoningOpened = false
-    let reasoningClosed = false
+    const ThinkingPartCtor = getThinkingPartCtor()
+    /** 是否已开启过思考段（用于在转入正文时补发 done 标记） */
+    let thinkingActive = false
+    /** 是否已发送过 done 标记，避免重复 */
+    let thinkingDoneSent = false
+
+    /** 把 reasoning 增量 yield 成 ThinkingPart；ctor 不可用时直接跳过 */
+    const yieldThinking = (text: string): vscode.LanguageModelResponsePart | undefined => {
+      if (!ThinkingPartCtor) return undefined
+      // ThinkingPart 不在标准 LanguageModelResponsePart union 内，运行时合法 → cast
+      return new ThinkingPartCtor(text) as unknown as vscode.LanguageModelResponsePart
+    }
+    const yieldThinkingDone = (): vscode.LanguageModelResponsePart | undefined => {
+      if (!ThinkingPartCtor || thinkingDoneSent) return undefined
+      thinkingDoneSent = true
+      return new ThinkingPartCtor('', '', {
+        vscode_reasoning_done: true,
+      }) as unknown as vscode.LanguageModelResponsePart
+    }
 
     try {
       for await (const raw of stream) {
@@ -329,22 +426,19 @@ class DeepSeekAdapter implements LlmAdapter {
           const delta = sseChunk.choices?.[0]?.delta
           if (!delta) continue
 
-          // thinking 模式 CoT 内容：累积原文 + 流式 yield 给 UI（首次出现时
-          // 先 yield 开放 marker；非思考片段到来时再 yield 关闭 marker）
+          // thinking 模式 CoT 增量：累积原文 + yield ThinkingPart
           if (delta.reasoning_content) {
-            if (!reasoningOpened) {
-              reasoningOpened = true
-              yield new vscode.LanguageModelTextPart(REASONING_OPEN_MARKER)
-            }
             reasoningOut.content += delta.reasoning_content
-            yield new vscode.LanguageModelTextPart(delta.reasoning_content)
+            thinkingActive = true
+            const p = yieldThinking(delta.reasoning_content)
+            if (p) yield p
           }
 
-          // 即将出现非思考内容（content / tool_calls）时关闭思考块
+          // 即将出现非思考内容（content / tool_calls）时补发 done 标记
           const hasNonReasoning = !!delta.content || !!delta.tool_calls?.length
-          if (hasNonReasoning && reasoningOpened && !reasoningClosed) {
-            reasoningClosed = true
-            yield new vscode.LanguageModelTextPart(REASONING_CLOSE_MARKER)
+          if (hasNonReasoning && thinkingActive && !thinkingDoneSent) {
+            const p = yieldThinkingDone()
+            if (p) yield p
           }
 
           // 文本内容：实时 yield，同时写入 textOut 用于指纹计算
@@ -375,9 +469,10 @@ class DeepSeekAdapter implements LlmAdapter {
       if (signal.aborted) return // 取消后的 socket 错误忽略
       throw err
     } finally {
-      // 流结束时若思考块仍开着（例如只有思考没有正文也没有工具调用），补一次关闭
-      if (reasoningOpened && !reasoningClosed) {
-        yield new vscode.LanguageModelTextPart(REASONING_CLOSE_MARKER)
+      // 流结束时若思考段还没补发 done，补一次（例如只有思考没有正文也没工具调用）
+      if (thinkingActive && !thinkingDoneSent) {
+        const p = yieldThinkingDone()
+        if (p) yield p
       }
       if (signal.aborted) destroyRequest()
     }
@@ -392,26 +487,33 @@ class DeepSeekAdapter implements LlmAdapter {
    *   - Assistant 含工具调用 → tool_calls 字段，content 可为 null
    *   - User 含工具结果       → 展开为多条 role:tool 消息（每条对应一个 callId）
    *   - 纯文本消息            → content 字段
-   *   - reasoning_content    → 从缓存中按指纹查找后注入（thinking 模式多轮必需）
-   *   - 思考块 (UI 用 marker) → 从 content 中按 REASONING_BLOCK_PATTERN 整段剥离
+   *   - 旧版 HTML marker 思考块（早期实现遗留）从 content 中剥离，避免重复
+   *
+   * tool_calls assistant 的 reasoning_content **始终注入**（DeepSeek 强制要求），
+   * 三层来源优先级：
+   *   1. 历史消息中的 LanguageModelThinkingPart（VS Code/Cursor 在多轮中保留）
+   *   2. 内存缓存（按 callId 指纹）
+   *   3. MISSING_REASONING_PLACEHOLDER 占位字符串（前两者都缺失时）
+   *
+   * 纯文本 assistant（无 tool_calls）：
+   *   - 文档明确写明 reasoning_content 在此场景下"会被忽略"
+   *   - 仅当本地能提供（ThinkingPart 或缓存命中）时回传，否则省略
    *
    * 容错策略：
    *   - 内容 part 同时支持 class 实例（instanceof）和 plain object（鸭子类型）
    *     避免 VS Code IPC 序列化后 instanceof 失效导致的类型误判
-   *   - 缓存判定使用 Map.has()（区分"未命中"与"命中但为空"）：
-   *       · has=true：按 has 命中处理，回填 reasoning_content（哪怕为空字符串），
-   *                   DeepSeek 文档允许空串作为合法 reasoning_content
-   *       · has=false：标记 hasMissingReasoning，由 chat() 切到 thinking:disabled
+   *   - 缓存判定使用 Map.has() 区分"未命中"与"命中但为空"
    *
    * @returns messages              转换后的 DeepSeek 消息列表
-   * @returns hasMissingReasoning   是否存在缺失 reasoning_content 的 tool_calls assistant
+   * @returns placeholderInjected   是否对至少一条 tool_calls assistant 注入了占位符
+   *                                （仅用于诊断日志，不影响请求行为）
    */
   private toDeepSeekMessages(messages: readonly vscode.LanguageModelChatMessage[]): {
     messages: DeepSeekMessage[]
-    hasMissingReasoning: boolean
+    placeholderInjected: boolean
   } {
     const result: DeepSeekMessage[] = []
-    let hasMissingReasoning = false
+    let placeholderInjected = false
 
     for (const msg of messages) {
       const rawContent = msg.content as unknown[]
@@ -422,6 +524,7 @@ class DeepSeekAdapter implements LlmAdapter {
       if (isAssistant) {
         const textValues: string[] = []
         const toolCallInfos: Array<{ callId: string; name: string; input: unknown }> = []
+        const thinkingPieces: string[] = []
 
         for (const p of parts) {
           const tc = extractToolCall(p)
@@ -429,32 +532,47 @@ class DeepSeekAdapter implements LlmAdapter {
             toolCallInfos.push(tc)
             continue
           }
+          const tk = extractThinkingPartText(p)
+          if (tk !== undefined) {
+            thinkingPieces.push(tk)
+            continue
+          }
           const tv = extractText(p)
           if (tv !== undefined) textValues.push(tv)
         }
 
-        // 把 UI 渲染用的思考块从 content 中剥离，避免和 reasoning_content 字段重复
-        const cleanText = textValues.join('').replace(REASONING_BLOCK_PATTERN, '')
+        // 把旧版 HTML marker 思考块从 content 中剥离（向后兼容老历史），
+        // 避免与 reasoning_content 字段重复发往 API
+        const cleanText = textValues.join('').replace(LEGACY_REASONING_BLOCK_PATTERN, '')
 
-        // 按指纹从缓存中查找 reasoning_content（用清洗后的文本作 key，与 chat()
-        // 写入端保持一致——写入端 textOut 也只累积 delta.content，不含 marker）
+        // reasoning_content 三层来源（ThinkingPart > 缓存 > 占位符）
+        const thinkingFromHistory = thinkingPieces.join('')
+        const hasThinkingInHistory = thinkingPieces.length > 0
+
         const fingerprint =
           toolCallInfos.length > 0
             ? toolCallInfos.map((tc) => tc.callId).join(',')
             : cleanText
         const cacheHit = fingerprint ? this.reasoningCache.has(fingerprint) : false
-        const reasoningContent = cacheHit ? (this.reasoningCache.get(fingerprint) ?? '') : undefined
-
-        // 只有真正"未命中"才触发降级；空字符串视为命中（DeepSeek 允许空串）
-        if (toolCallInfos.length > 0 && !cacheHit) {
-          hasMissingReasoning = true
-        }
+        const cachedReasoning = cacheHit ? (this.reasoningCache.get(fingerprint) ?? '') : ''
 
         if (toolCallInfos.length > 0) {
+          // tool_calls assistant：reasoning_content 字段必须存在且非空，
+          // 否则 DeepSeek API 直接 400
+          let reasoningContent: string
+          if (hasThinkingInHistory && thinkingFromHistory.length > 0) {
+            reasoningContent = thinkingFromHistory
+          } else if (cacheHit && cachedReasoning.length > 0) {
+            reasoningContent = cachedReasoning
+          } else {
+            reasoningContent = MISSING_REASONING_PLACEHOLDER
+            placeholderInjected = true
+          }
+
           result.push({
             role: 'assistant',
             content: cleanText.length > 0 ? cleanText : null,
-            ...(cacheHit ? { reasoning_content: reasoningContent } : {}),
+            reasoning_content: reasoningContent,
             tool_calls: toolCallInfos.map((tc) => ({
               id: tc.callId,
               type: 'function',
@@ -465,10 +583,16 @@ class DeepSeekAdapter implements LlmAdapter {
             })),
           })
         } else {
+          // 纯文本 assistant：服务端对此场景的 reasoning_content 是可选的
+          // （文档明确说明"在两个 user 消息之间，如果模型未进行工具调用，则
+          // 中间 assistant 的 reasoning_content 无需参与上下文拼接，传入会
+          // 被忽略"），仅当能从本地提供时回传，避免污染上下文
+          const hasLocalReasoning = hasThinkingInHistory || cacheHit
+          const reasoning = hasThinkingInHistory ? thinkingFromHistory : cachedReasoning
           result.push({
             role: 'assistant',
             content: cleanText,
-            ...(cacheHit ? { reasoning_content: reasoningContent } : {}),
+            ...(hasLocalReasoning ? { reasoning_content: reasoning } : {}),
           })
         }
       } else {
@@ -494,7 +618,7 @@ class DeepSeekAdapter implements LlmAdapter {
       }
     }
 
-    return { messages: result, hasMissingReasoning }
+    return { messages: result, placeholderInjected }
   }
 }
 

@@ -15,6 +15,9 @@ import { log } from '../shared/logger'
 //   2. 通过激活的 LLM Adapter 发送请求，按 Part 类型分流处理：
 //      - LanguageModelTextPart     → 实时流式输出 + 收集
 //      - LanguageModelToolCallPart → 收集工具调用请求
+//      - LanguageModelThinkingPart → 累积成 stream.progress("正在推理: ...")
+//        实时灰条状态（chat 参与者路径无原生 thinking 渲染，用 progress 模拟
+//        与 LmProvider 路径的"正在推理"一致的视觉效果）
 //   3. 判断是否继续：
 //      - 无工具调用 → 结束（文本已流式输出）
 //      - 有工具调用 → 执行工具（并发安全的只读工具批量并发执行），追加结果，进入下一轮
@@ -23,6 +26,40 @@ import { log } from '../shared/logger'
 //              写工具（isReadOnly: false）仍串行执行，保证执行顺序正确。
 //              最终结果按工具调用的原始顺序重新排列，确保消息序列合法。
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** 检测 ThinkingPart 类型（proposed API，宿主可能未提供） */
+function isThinkingPart(p: unknown): boolean {
+  const ctor = (vscode as unknown as { LanguageModelThinkingPart?: unknown })
+    .LanguageModelThinkingPart
+  if (typeof ctor === 'function' && p instanceof (ctor as new (...args: never[]) => unknown)) {
+    return true
+  }
+  // 鸭子类型兜底：有 value 字段、没有 callId、有 id 或 metadata 之一
+  const obj = p as { value?: unknown; id?: unknown; metadata?: unknown; callId?: unknown }
+  return !!(
+    obj &&
+    typeof obj === 'object' &&
+    (typeof obj.value === 'string' || Array.isArray(obj.value)) &&
+    !('callId' in obj) &&
+    (obj.id !== undefined || obj.metadata !== undefined)
+  )
+}
+
+/** 取 ThinkingPart 的纯文本（value 可能是 string 或 string[]） */
+function thinkingPartText(p: unknown): string {
+  const v = (p as { value?: unknown }).value
+  if (typeof v === 'string') return v
+  if (Array.isArray(v)) return v.join('')
+  return ''
+}
+
+/** 把多行思考压缩成 progress 单行预览，截断过长内容 */
+function buildThinkingProgressMessage(thinking: string): string {
+  const collapsed = thinking.replace(/\s+/g, ' ').trim()
+  const MAX = 80
+  const tail = collapsed.length > MAX ? collapsed.slice(-MAX) : collapsed
+  return tail ? `正在推理：${tail}` : '正在推理…'
+}
 
 // ── 类型定义 ──────────────────────────────────────────────────────────────────
 
@@ -86,6 +123,8 @@ export async function runAgentLoop(
     // ── 单次 LLM 调用，按 Part 类型分流收集 ──────────────────────────────────
     const textParts: vscode.LanguageModelTextPart[] = []
     const toolCalls: vscode.LanguageModelToolCallPart[] = []
+    let thinkingBuf = '' // 累积思考全文用于 progress 状态条
+    let thinkingDone = false
 
     const abortController = new AbortController()
     const cancelDisposable = token.onCancellationRequested(() => abortController.abort())
@@ -102,6 +141,21 @@ export async function runAgentLoop(
           stream.markdown(part.value)
         } else if (part instanceof vscode.LanguageModelToolCallPart) {
           toolCalls.push(part)
+        } else if (isThinkingPart(part)) {
+          // 思考块：用 progress 渲染"正在推理：xxx"灰条，正文到来时会被自动替换。
+          // 不入 textParts/history（避免污染 content）；reasoning_content 由
+          // adapter 内部缓存维持多轮一致性。
+          const meta = (part as { metadata?: { vscode_reasoning_done?: unknown } }).metadata
+          const isDoneMarker = !!meta?.vscode_reasoning_done
+          if (isDoneMarker) {
+            thinkingDone = true
+            continue
+          }
+          const piece = thinkingPartText(part)
+          if (piece && !thinkingDone) {
+            thinkingBuf += piece
+            stream.progress(buildThinkingProgressMessage(thinkingBuf))
+          }
         }
       }
     } catch (err) {
