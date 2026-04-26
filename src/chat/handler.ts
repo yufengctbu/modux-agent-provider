@@ -1,6 +1,7 @@
 import * as vscode from 'vscode'
 import { getWorkspaceContext } from './workspace'
 import { runAgentLoop } from './loop'
+import { getAdapterByType } from '../provider/registry'
 import { log } from '../shared/logger'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -34,4 +35,34 @@ export async function handleChatRequest(
   await runAgentLoop(request.prompt, context, stream, token, wsCtx)
 
   log('[Handler] 请求处理完成')
+}
+
+/**
+ * DeepSeek Chat Participant 请求处理入口
+ *
+ * 与 handleChatRequest 相同流程，但强制使用 DeepSeek 适配器，
+ * 与 config.llms 中的 enabled 标志无关。
+ */
+export async function handleDeepSeekChatRequest(
+  request: vscode.ChatRequest,
+  context: vscode.ChatContext,
+  stream: vscode.ChatResponseStream,
+  token: vscode.CancellationToken,
+): Promise<void> {
+  log(`[Handler] DeepSeek 收到消息：${request.prompt}`)
+
+  let adapter
+  try {
+    adapter = getAdapterByType('deepseek')
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    log(`[Handler] DeepSeek Adapter 未就绪：${msg}`)
+    stream.markdown(`**配置错误**：${msg}`)
+    return
+  }
+
+  const wsCtx = await getWorkspaceContext()
+  await runAgentLoop(request.prompt, context, stream, token, wsCtx, adapter)
+
+  log('[Handler] DeepSeek 请求处理完成')
 }

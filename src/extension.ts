@@ -3,6 +3,7 @@ import { registerAgent } from './provider/index'
 import { registerLogger, log } from './shared/logger'
 import { initPermissions } from './tools/permissions'
 import './tools' // 触发工具注册副作用（将所有工具注册到 toolsManager）
+import './provider/adapters' // 触发 LLM 适配器注册副作用（将所有 adapter 注册到 registry）
 
 /**
  * 扩展激活入口

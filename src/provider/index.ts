@@ -1,8 +1,8 @@
 import * as vscode from 'vscode'
-import { AGENT_ID } from '../constants/common'
-import { handleChatRequest } from '../chat/handler'
-import { LmProvider } from './LmProvider'
 import { log } from '../shared/logger'
+import { LmProvider } from './LmProvider'
+import { AGENT_ID, DEEPSEEK_AGENT_ID } from '../constants/common'
+import { handleChatRequest, handleDeepSeekChatRequest } from '../chat/handler'
 
 /**
  * Provider 层：向 Copilot 注册 modux-agent
@@ -22,7 +22,15 @@ export function registerAgent(context: vscode.ExtensionContext): void {
   context.subscriptions.push(participant)
   log(`Chat Participant 已注册：${AGENT_ID}`)
 
-  // 2. 注册 Language Model Provider（Copilot Chat 模型下拉列表）
+  // 2. 注册 DeepSeek Chat Participant（@modux-agent-deepseek）
+  const deepseekParticipant = vscode.chat.createChatParticipant(
+    DEEPSEEK_AGENT_ID,
+    handleDeepSeekChatRequest,
+  )
+  context.subscriptions.push(deepseekParticipant)
+  log(`Chat Participant 已注册：${DEEPSEEK_AGENT_ID}`)
+
+  // 3. 注册 Language Model Provider（Copilot Chat 模型下拉列表）
   //    vendor 必须与 package.json contributes.languageModelChatProviders[].vendor 一致
   const lmProvider = vscode.lm.registerLanguageModelChatProvider('modux', new LmProvider())
   context.subscriptions.push(lmProvider)

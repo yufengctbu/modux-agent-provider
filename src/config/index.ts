@@ -5,7 +5,7 @@ import rawConfig from './config.json'
  *
  * 使用方式：
  *   import { config } from '../config'
- *   config.backend.enabled              // boolean
+ *   config.llms                         // LLM 适配器条目数组
  *   config.tools.readFile.enabled       // boolean
  *   config.agent.maxLoopRounds          // number
  *
@@ -13,14 +13,15 @@ import rawConfig from './config.json'
  * 此文件只导出只读对象，所有字段在 TypeScript 层面均不可写入。
  *
  * ── 字段说明 ────────────────────────────────────────────────────────────────
- * backend
- *   .enabled        是否将聊天请求转发到自定义后端服务
- *   .url            后端接口地址
- *   .forwardTools   是否将 VS Code 工具附件（#file 等）转发给后端
- *
- * llm
- *   .vendor         底层 Copilot 模型提供方（固定为 "copilot"）
- *   .family         底层模型系列，可改为 "gpt-4o-mini" / "claude-sonnet-4-5" 等
+ * llms              LLM 适配器条目数组，按顺序查找，采用第一个 enabled:true 的条目
+ *   .type           适配器类型标识，必须与 provider/adapters/ 下已注册的工厂匹配
+ *                   当前内置：
+ *                     "copilot"       通过 vscode.lm 调用 Copilot 的底层模型
+ *                     "moduxBackend"  转发至用户自有的 OpenAI-compatible HTTP 服务
+ *   .enabled        是否启用此条目
+ *   （其余字段）    由具体 Adapter 解释：
+ *                     copilot:       vendor / family
+ *                     moduxBackend:  url / forwardTools
  *
  * tools             各工具开关（对应 src/tools/ 下的每个工具实现）
  *   .readFile       读取文件内容（默认开启）

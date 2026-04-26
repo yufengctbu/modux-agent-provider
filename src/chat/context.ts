@@ -1,8 +1,8 @@
 import * as vscode from 'vscode'
 import { config } from '../config'
-import { selectModel, sendChatRequest } from '../llm/client'
 import { buildSystemPrompt } from '../constants/prompts'
 import { toolsManager } from '../tools'
+import { getActiveAdapter } from '../provider/registry'
 import { log } from '../shared/logger'
 import { loadMemoryFile, type WorkspaceContext } from './workspace'
 
@@ -245,13 +245,12 @@ function convertChatHistoryToMessages(
 }
 
 /**
- * 调用 LLM 生成历史摘要，返回 [摘要 User 消息, Assistant 接续确认] 两条消息。
+ * 通过激活的 LLM Adapter 生成历史摘要，返回 [摘要 User 消息, Assistant 接续确认] 两条消息。
  */
 async function compactHistoryWithLLM(
   messages: vscode.LanguageModelChatMessage[],
 ): Promise<vscode.LanguageModelChatMessage[]> {
-  const model = await selectModel()
-  if (!model) throw new Error('未找到可用模型')
+  const adapter = getActiveAdapter()
 
   const compactRequest: vscode.LanguageModelChatMessage[] = [
     vscode.LanguageModelChatMessage.User(COMPACT_SYSTEM_PROMPT),
@@ -259,15 +258,22 @@ async function compactHistoryWithLLM(
     vscode.LanguageModelChatMessage.User('Generate the summary in the format described above.'),
   ]
 
-  const tokenSource = new vscode.CancellationTokenSource()
-  const response = await sendChatRequest(model, compactRequest, [], tokenSource.token)
-  tokenSource.dispose()
+  const abortController = new AbortController()
 
   let summary = ''
-  for await (const part of response.stream) {
-    if (part instanceof vscode.LanguageModelTextPart) {
-      summary += part.value
+  try {
+    for await (const part of adapter.chat({
+      messages: compactRequest,
+      tools: [],
+      signal: abortController.signal,
+    })) {
+      if (part instanceof vscode.LanguageModelTextPart) {
+        summary += part.value
+      }
     }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new Error(`LLM 摘要调用失败：${msg}`)
   }
 
   if (!summary.trim()) throw new Error('LLM 返回空摘要')

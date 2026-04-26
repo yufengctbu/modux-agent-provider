@@ -1,8 +1,9 @@
 import * as vscode from 'vscode'
-import { selectModel, sendChatRequest } from '../llm/client'
 import { config } from '../config'
 import { ContextBuilder } from './context'
 import { toolsManager } from '../tools'
+import { getActiveAdapter } from '../provider/registry'
+import type { LlmAdapter } from '../provider/types'
 import type { WorkspaceContext } from './workspace'
 import { log } from '../shared/logger'
 
@@ -11,7 +12,7 @@ import { log } from '../shared/logger'
 //
 // 每轮流程：
 //   1. 构建消息列表（第 1 轮含用户 prompt，后续轮次含工具结果）
-//   2. 调用 LLM，按 Part 类型分流处理：
+//   2. 通过激活的 LLM Adapter 发送请求，按 Part 类型分流处理：
 //      - LanguageModelTextPart     → 实时流式输出 + 收集
 //      - LanguageModelToolCallPart → 收集工具调用请求
 //   3. 判断是否继续：
@@ -22,9 +23,6 @@ import { log } from '../shared/logger'
 //              写工具（isReadOnly: false）仍串行执行，保证执行顺序正确。
 //              最终结果按工具调用的原始顺序重新排列，确保消息序列合法。
 // ─────────────────────────────────────────────────────────────────────────────
-
-/** 未找到可用模型时向用户展示的提示 */
-const NO_MODEL_MESSAGE = '未找到可用的语言模型。请确保已安装并启用 GitHub Copilot 扩展。'
 
 // ── 类型定义 ──────────────────────────────────────────────────────────────────
 
@@ -56,10 +54,15 @@ export async function runAgentLoop(
   stream: vscode.ChatResponseStream,
   token: vscode.CancellationToken,
   wsCtx: WorkspaceContext,
+  overrideAdapter?: LlmAdapter,
 ): Promise<void> {
-  const model = await selectModel()
-  if (!model) {
-    stream.markdown(NO_MODEL_MESSAGE)
+  let adapter
+  try {
+    adapter = overrideAdapter ?? getActiveAdapter()
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    log(`[Loop] Adapter 未就绪：${msg}`)
+    stream.markdown(`**配置错误**：${msg}`)
     return
   }
 
@@ -72,7 +75,7 @@ export async function runAgentLoop(
       break
     }
 
-    log(`[Loop] 第 ${round} 轮开始`)
+    log(`[Loop] 第 ${round} 轮开始（adapter=${adapter.type}）`)
 
     // 构建消息列表：第 1 轮追加用户 prompt，后续轮次工具结果已在列表中
     const messages =
@@ -84,14 +87,15 @@ export async function runAgentLoop(
     const textParts: vscode.LanguageModelTextPart[] = []
     const toolCalls: vscode.LanguageModelToolCallPart[] = []
 
+    const abortController = new AbortController()
+    const cancelDisposable = token.onCancellationRequested(() => abortController.abort())
+
     try {
-      const response = await sendChatRequest(
-        model,
+      for await (const part of adapter.chat({
         messages,
-        toolsManager.getAvailableTools(),
-        token,
-      )
-      for await (const part of response.stream) {
+        tools: toolsManager.getAvailableTools(),
+        signal: abortController.signal,
+      })) {
         if (part instanceof vscode.LanguageModelTextPart) {
           textParts.push(part)
           // 实时流式输出文本（无论是否有工具调用，让用户看到 LLM 的推理过程）
@@ -106,7 +110,16 @@ export async function runAgentLoop(
         stream.markdown(`\n\n**请求失败**（${err.code}）：${err.message}`)
         return
       }
-      throw err
+      if (err instanceof Error && err.name === 'AbortError') {
+        log('[Loop] 请求被取消')
+        return
+      }
+      const msg = err instanceof Error ? err.message : String(err)
+      log(`[Loop] Adapter 执行失败：${msg}`)
+      stream.markdown(`\n\n**请求失败**：${msg}`)
+      return
+    } finally {
+      cancelDisposable.dispose()
     }
 
     // 将本轮 assistant 消息（文本 + 工具调用）写入上下文

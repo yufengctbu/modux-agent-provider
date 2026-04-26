@@ -1,13 +1,25 @@
 {
-  "backend": {
-    "enabled": false,
-    "url": "http://localhost:3000/v1/chat",
-    "forwardTools": true
-  },
-  "llm": {
-    "vendor": "copilot",
-    "family": "gpt-4o"
-  },
+  "llms": [
+    {
+      "type": "copilot",
+      "enabled": false,
+      "vendor": "copilot",
+      "family": "gpt-4o"
+    },
+    {
+      "type": "moduxBackend",
+      "enabled": false,
+      "url": "http://localhost:3000/v1/chat",
+      "forwardTools": true
+    },
+    {
+      "type": "deepseek",
+      "enabled": true,
+      "apiKey": "sk-e998f1381b9c4af09204baed38d64b46",
+      "model": "deepseek-v4-flash",
+      "baseUrl": "https://api.deepseek.com"
+    }
+  ],
   "tools": {
     "readFile": { "enabled": true },
     "listDir": { "enabled": true },
