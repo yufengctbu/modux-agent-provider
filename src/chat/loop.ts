@@ -7,6 +7,7 @@ import type { LlmAdapter } from '../provider/types'
 import type { WorkspaceContext } from './workspace'
 import { log } from '../shared/logger'
 import { estimateToolDefinitions } from '../shared/tokenEstimator'
+import { CompactManager } from '../compact'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Agent 核心循环
@@ -116,12 +117,15 @@ export async function runAgentLoop(
     Number.isFinite(rawMaxRounds) && rawMaxRounds > 0 ? Math.min(50, Math.floor(rawMaxRounds)) : 5
 
   // ContextBuilder 在此处构造，工具名已确定，System Prompt 与实际注入工具列表保持一致。
-  // 未来 routing.toolWhitelist 过滤后，只需把过滤结果传入，两者仍然同步。
   const contextBuilder = new ContextBuilder(
     wsCtx,
     history,
     tools.map((t) => t.name),
   )
+
+  // CompactManager 封装全部压缩逻辑：Layer 3 自动压缩 + 响应式重试
+  // 内部读取 config.compact，维护熔断计数器，外部只传数据。
+  const compactMgr = new CompactManager(adapter, contextBuilder)
 
   for (let round = 1; round <= maxRounds; round++) {
     if (token.isCancellationRequested) {
@@ -131,11 +135,14 @@ export async function runAgentLoop(
 
     log(`[Loop] 第 ${round} 轮开始（adapter=${adapter.type}）`)
 
-    // 构建消息列表：第 1 轮追加用户 prompt，后续轮次工具结果已在列表中
-    const messages =
+    // 构建消息列表（含 Layer 1 微压缩）：第 1 轮追加用户 prompt，后续轮次工具结果已在列表中
+    let messages =
       round === 1
         ? await contextBuilder.buildForFirstRound(initialPrompt)
         : contextBuilder.buildForContinuationRound()
+
+    // ── Layer 3：Token 感知自动压缩（内部处理阈值判断、熔断、写回）────────
+    messages = await compactMgr.applyAutoCompact(messages)
 
     // ── 单次 LLM 调用，按 Part 类型分流收集 ──────────────────────────────────
     const textParts: vscode.LanguageModelTextPart[] = []
@@ -148,12 +155,12 @@ export async function runAgentLoop(
 
     log(`[Loop] 第 ${round} 轮：消息数=${messages.length}`)
 
+    // 构建 chatFn（捕获 tools + signal，供响应式包裹器在重试时复用）
+    const chatFn = (msgs: readonly vscode.LanguageModelChatMessage[]) =>
+      adapter.chat({ messages: msgs, tools, signal: abortController.signal })
+
     try {
-      for await (const part of adapter.chat({
-        messages,
-        tools,
-        signal: abortController.signal,
-      })) {
+      for await (const part of compactMgr.wrapChat(chatFn, messages)) {
         if (part instanceof vscode.LanguageModelTextPart) {
           textParts.push(part)
           // 实时流式输出文本（无论是否有工具调用，让用户看到 LLM 的推理过程）

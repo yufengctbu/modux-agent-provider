@@ -40,6 +40,13 @@ export interface LlmAdapter {
   readonly type: string
 
   /**
+   * 模型上下文窗口大小（token 数）。
+   * 供 Layer 3 autoCompact 和 Layer 6 reactiveCompact 用于 token 预算判断。
+   * 未声明时由调用侧使用默认兜底值（32_000）。
+   */
+  readonly contextWindowSize?: number
+
+  /**
    * 向 VS Code 模型选择器暴露的元数据
    * 目前统一呈现单一 "modux-agent" 入口，底层由激活的 Adapter 提供服务
    */

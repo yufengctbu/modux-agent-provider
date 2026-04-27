@@ -67,6 +67,8 @@ interface SseDelta {
 
 class ModuxBackendAdapter implements LlmAdapter {
   readonly type = 'moduxBackend'
+  /** 自有后端保守估算的上下文窗口，实际值由后端模型决定 */
+  readonly contextWindowSize = 16_000
 
   constructor(private readonly cfg: ModuxBackendConfig) {}
 

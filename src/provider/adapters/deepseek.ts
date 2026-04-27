@@ -159,7 +159,7 @@ interface DeepSeekConfig {
    * false → 图像剥离为简短文本占位，避免触发服务端 400
    *
    * DeepSeek 主流文本模型（chat / reasoner）当前不支持视觉，默认 false；
-   * 若使用 DeepSeek-VL 等视觉模型，可在 config.json 中显式置 true。
+   * 若使用 DeepSeek-VL 等视觉模型，可在 config.ts 中显式置 true。
    */
   readonly supportsVision: boolean
 }
@@ -249,6 +249,8 @@ interface PartialToolCall {
 
 class DeepSeekAdapter implements LlmAdapter {
   readonly type = 'deepseek'
+  /** DeepSeek 模型上下文窗口（128k token），供压缩模块做 token 预算判断 */
+  readonly contextWindowSize = 128_000
 
   /**
    * reasoning_content 缓存：key = assistant 消息指纹
@@ -290,7 +292,7 @@ class DeepSeekAdapter implements LlmAdapter {
 
   async *chat(req: LlmChatRequest): AsyncIterable<vscode.LanguageModelResponsePart> {
     if (!this.cfg.apiKey) {
-      throw new Error('DeepSeek 适配器未配置 apiKey，请在 config.json 中填写 deepseek.apiKey')
+      throw new Error('DeepSeek 适配器未配置 apiKey，请在 config.ts 中填写 deepseek.apiKey')
     }
 
     const effectiveThinking = this.cfg.thinkingMode
@@ -314,11 +316,11 @@ class DeepSeekAdapter implements LlmAdapter {
         ? ('required' as const)
         : undefined
 
-    // 🪙 thinking 模式由 config.json 控制（默认关闭以节省输出 token）
+    // 🪙 thinking 模式由 config.ts 控制（默认关闭以节省输出 token）
     //
     // v4-pro 默认开启思考模式，reasoning_content 按输出价格（6元/M promo / 24元/M regular）
     // 计费。Agent 工具调用场景不需要 CoT 推理，推荐关闭以节省 50-90% 输出 token 费用。
-    // 如需恢复思考模式（复杂推理任务），在 config.json 中设置 thinkingEnabled: true。
+    // 如需恢复思考模式（复杂推理任务），在 config.ts 中设置 thinkingEnabled: true。
     //
     // 注意：thinking:{type:'disabled'} 只控制本轮是否**产出** reasoning_content，
     // 不影响历史消息中已存在的 reasoning_content 字段（由 toDeepSeekMessages 保证非空）。

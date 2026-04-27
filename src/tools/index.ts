@@ -21,7 +21,7 @@ import { todoWriteTool } from './lib/todoTool'
 // 添加新工具：
 //   1. 在 lib/ 目录下创建工具文件（实现 ModuxTool 接口并导出 name 常量）
 //   2. 在此文件中 import 并调用 toolsManager.register()
-//   3. 在 config/config.json 的 tools 节点中添加对应的 enabled 配置
+//   3. 在 config/config.ts 的 tools 节点中添加对应的 enabled 配置
 // ***
 
 toolsManager.register(readFileTool)

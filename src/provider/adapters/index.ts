@@ -8,7 +8,7 @@
 // 添加新 Adapter：
 //   1. 在本目录下创建新文件（实现 LlmAdapter + 文件末尾调用 registerAdapterFactory）
 //   2. 在下方 import 该文件
-//   3. 在 config/config.json 的 llms 数组中新增一条对应条目
+//   3. 在 config/config.ts 的 llms 数组中新增一条对应条目
 // ─────────────────────────────────────────────────────────────────────────────
 
 import './moduxBackend'

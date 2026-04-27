@@ -85,7 +85,7 @@ export const readFileTool: ModuxTool = {
 
     // ── 文本去重快捷路径 ──────────────────────────────────────────────────────
     // 同一文件 + 同一范围 + 同一 mtime → 返回 stub，节省 token
-    if (config.agent.fileReadDedupEnabled !== false) {
+    if (config.agent.fileReadDedupEnabled) {
       const stubResult = await tryReturnUnchangedStub(ctx, resolved, filePath, startLine, endLine)
       if (stubResult) return stubResult
     }

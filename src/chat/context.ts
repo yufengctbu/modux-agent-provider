@@ -2,9 +2,9 @@ import * as vscode from 'vscode'
 import { config } from '../config'
 import { buildSystemPrompt } from '../constants/prompts'
 import { toolsManager } from '../tools'
-import { getActiveAdapter } from '../provider/registry'
 import { log } from '../shared/logger'
 import { loadMemoryFile, type WorkspaceContext } from './workspace'
+import { applyMicrocompaction, initCompactHistory } from '../compact'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ContextBuilder — 对话消息列表的构建与维护
@@ -23,41 +23,17 @@ import { loadMemoryFile, type WorkspaceContext } from './workspace'
 /** System Prompt 注入后 Assistant 的确认回复，防止模型在后续重述指令 */
 const SYSTEM_ACK = 'Understood. I will follow these instructions.'
 
-/** 历史压缩后 Assistant 的接续确认，防止模型打招呼或重述历史 */
-const COMPACT_ACK =
-  'Understood. I have the context from the previous session and will continue from where we left off.'
-
-/** LLM 摘要压缩超时（30 秒），超时后自动 abort 降级为截断 */
-const COMPACT_TIMEOUT_MS = 30_000
-
-/**
- * 微压缩占位文本：替换掉旧的、冗长的 ToolResultPart 文本主体
- *
- * 目的：保留 callId 与 ToolCallPart 的配对结构（API 合法性），同时把字符数压缩到接近 0。
- * 最近的工具结果保持原样（LLM 当前推理的"工作记忆"），早期工具结果折叠为占位。
- */
-const MICRO_COMPACT_TOOL_RESULT_STUB =
-  '[Earlier tool result removed by microcompaction to save context tokens. ' +
-  'If you need the original content, re-invoke the tool with the same arguments.]'
-
-/**
- * LLM 生成摘要时使用的压缩 Prompt
- * 结构化摘要确保后续对话能接续，不丢失关键任务上下文。
- */
-const COMPACT_SYSTEM_PROMPT = `Compress the following conversation history into a structured summary for use in continuing the conversation.
-
-The summary must include the following sections:
-1. The user's core request and intent
-2. Work completed (files involved, code changes, command execution results)
-3. Errors found and how they were fixed
-4. Remaining tasks (if any)
-5. Current working state (what was being done most recently, where progress stands)
-
-Format: concise, information-dense; retain key code snippets and file paths.`
+/** 固定前缀消息数量（层 1-4 各占 1 条：System Prompt + ACK + 工作区 + 工作区 ACK） */
+export const CONTEXT_FIXED_PREFIX_COUNT = 4
 
 // ── ContextBuilder ────────────────────────────────────────────────────────────
 
 export class ContextBuilder {
+  /**
+   * 固定前缀消息数量，供 CompactManager 识别历史区间边界。
+   * 值与模块常量 CONTEXT_FIXED_PREFIX_COUNT 始终保持一致。
+   */
+  readonly prefixCount = CONTEXT_FIXED_PREFIX_COUNT
   /**
    * 维护当前 loop 内的消息列表。
    * 初始化时写入层 1–4，之后每轮由 loop.ts 追加 assistant 回复和工具结果。
@@ -146,7 +122,7 @@ export class ContextBuilder {
     // 将用户消息持久化到消息列表，确保 Round 2+ LLM 仍能看到原始任务
     this.messages.push(userMsg)
 
-    return applyMicrocompaction(this.messages)
+    return this.applyMicrocompaction()
   }
 
   /**
@@ -154,7 +130,33 @@ export class ContextBuilder {
    * 在 loop 第 2+ 轮调用（工具结果已在上一轮末尾追加）。
    */
   buildForContinuationRound(): vscode.LanguageModelChatMessage[] {
-    return applyMicrocompaction(this.messages)
+    return this.applyMicrocompaction()
+  }
+
+  // ── 历史消息访问（供 compact 模块使用） ──────────────────────────────────────
+
+  /**
+   * 返回固定前缀之后的全部历史消息（不含前缀）。
+   *
+   * 固定前缀 = CONTEXT_FIXED_PREFIX_COUNT 条（System Prompt + ACK + 工作区 + 工作区 ACK）。
+   * 调用时机：autoCompact / reactiveCompact 需要拿到可压缩的历史区间。
+   */
+  getHistoryMessages(): vscode.LanguageModelChatMessage[] {
+    return this.messages.slice(CONTEXT_FIXED_PREFIX_COUNT)
+  }
+
+  /**
+   * 替换固定前缀之后的全部历史消息。
+   *
+   * 固定前缀永远不被修改，保证 System Prompt 等稳定结构不被压缩操作破坏。
+   * 调用时机：autoCompact / reactiveCompact 完成摘要后回写新历史。
+   */
+  replaceHistoryMessages(msgs: vscode.LanguageModelChatMessage[]): void {
+    this.messages.splice(
+      CONTEXT_FIXED_PREFIX_COUNT,
+      this.messages.length - CONTEXT_FIXED_PREFIX_COUNT,
+      ...msgs,
+    )
   }
 
   // ── 消息追加 ───────────────────────────────────────────────────────────────
@@ -208,165 +210,32 @@ export class ContextBuilder {
     )
     this.messages.push(vscode.LanguageModelChatMessage.User(syntheticResults))
   }
+
+  // ── 私有方法 ────────────────────────────────────────────────────────────────
+
+  /**
+   * 对 this.messages 执行微压缩并返回新数组。
+   *
+   * 包装 applyMicrocompactionWithStats，并在有替换时记录日志。
+   * 每轮调用（含首轮无 ToolResult 的情况），保持逻辑一致。
+   */
+  private applyMicrocompaction(): vscode.LanguageModelChatMessage[] {
+    const { messages, replacedCount, savedChars } = applyMicrocompaction(
+      this.messages,
+      {
+        keepRecent: config.agent.microcompactKeepRecentToolResults ?? 6,
+        minChars: config.agent.microcompactMinToolResultChars ?? 400,
+      },
+      config.agent.microcompactEnabled,
+    )
+    if (replacedCount > 0) {
+      log(`[Context] 微压缩：${replacedCount} 个旧工具结果，约节省 ${savedChars} 字符`)
+    }
+    return messages
+  }
 }
 
 // ── 内部工具函数 ──────────────────────────────────────────────────────────────
-
-/**
- * 微压缩（microcompaction）
- *
- * 设计来源：Claude Code microCompact —— 在历史消息中扫描 ToolResultPart，
- * 把"足够老 + 足够大"的工具结果替换为占位文本，保留 callId 不变以维持 API 合法性。
- *
- * 与 LLM 摘要压缩的差异：
- *   - LLM 摘要：整段历史 → 一段摘要（损失细粒度，但节省最多 token）
- *   - 微压缩  ：仅替换旧工具结果文本（不动 ToolCall 结构与近期消息）
- *
- * 应用顺序：先做微压缩（轻量、无副作用），再做 LLM 摘要（重量、需调用模型）。
- *
- * 何时不动：
- *   - 最后 N 条 ToolResult（默认 6）：当前推理的工作记忆
- *   - 单条文本 < minChars（默认 400）：压缩反而比原文长
- *   - DataPart（图像）：图像不属于"文本结果"，由独立的剥离逻辑处理
- *
- * 性能：单次扫描 O(n)；返回新的消息数组，不修改原数组（保证 ContextBuilder.messages 不丢数据）。
- */
-function applyMicrocompaction(
-  messages: ReadonlyArray<vscode.LanguageModelChatMessage>,
-): vscode.LanguageModelChatMessage[] {
-  if (!config.agent.microcompactEnabled) return [...messages]
-
-  const keepRecent = Math.max(0, config.agent.microcompactKeepRecentToolResults ?? 6)
-  const minChars = Math.max(0, config.agent.microcompactMinToolResultChars ?? 400)
-
-  // 第一遍：从右向左数 ToolResultPart 出现次数，确定"哪些需要保留原样"的 callId 集合
-  const recentCallIds = new Set<string>()
-  for (let i = messages.length - 1; i >= 0 && recentCallIds.size < keepRecent; i--) {
-    const content = messages[i].content as vscode.LanguageModelInputPart[]
-    for (let j = content.length - 1; j >= 0 && recentCallIds.size < keepRecent; j--) {
-      const part = content[j]
-      if (part instanceof vscode.LanguageModelToolResultPart) {
-        recentCallIds.add(part.callId)
-      }
-    }
-  }
-
-  // 第二遍：替换所有不在"近期保留集合"中的 ToolResultPart 文本
-  let replacedCount = 0
-  let savedChars = 0
-  const result = messages.map((msg) => {
-    const content = msg.content as vscode.LanguageModelInputPart[]
-    let mutated = false
-
-    const newContent = content.map((part) => {
-      if (!(part instanceof vscode.LanguageModelToolResultPart)) return part
-      if (recentCallIds.has(part.callId)) return part
-
-      const totalText = sumToolResultTextLength(part)
-      if (totalText < minChars) return part
-
-      mutated = true
-      replacedCount++
-      savedChars += totalText - MICRO_COMPACT_TOOL_RESULT_STUB.length
-      return new vscode.LanguageModelToolResultPart(part.callId, [
-        new vscode.LanguageModelTextPart(MICRO_COMPACT_TOOL_RESULT_STUB),
-      ])
-    })
-
-    return mutated ? cloneMessageWithContent(msg, newContent) : msg
-  })
-
-  if (replacedCount > 0) {
-    log(`[Context] 微压缩：${replacedCount} 个旧工具结果，约节省 ${savedChars} 字符`)
-  }
-  return result
-}
-
-/** 累计单个 ToolResultPart 内所有 LanguageModelTextPart 的字符长度 */
-function sumToolResultTextLength(part: vscode.LanguageModelToolResultPart): number {
-  let total = 0
-  for (const inner of part.content) {
-    if (inner instanceof vscode.LanguageModelTextPart) {
-      total += inner.value.length
-    }
-  }
-  return total
-}
-
-/** 用新内容克隆一条 ChatMessage（保留 role；name 字段官方 API 不暴露读取，照搬 role 即可） */
-function cloneMessageWithContent(
-  original: vscode.LanguageModelChatMessage,
-  newContent: vscode.LanguageModelInputPart[],
-): vscode.LanguageModelChatMessage {
-  if (original.role === vscode.LanguageModelChatMessageRole.Assistant) {
-    return vscode.LanguageModelChatMessage.Assistant(
-      newContent as Array<vscode.LanguageModelTextPart | vscode.LanguageModelToolCallPart>,
-    )
-  }
-  // 默认 User（VS Code LM API 仅有 User / Assistant 两种角色）
-  return vscode.LanguageModelChatMessage.User(
-    newContent as Array<
-      | vscode.LanguageModelTextPart
-      | vscode.LanguageModelToolResultPart
-      | vscode.LanguageModelDataPart
-    >,
-  )
-}
-
-/**
- * 在 LLM 摘要压缩前剥离图像 DataPart
- *
- * 摘要任务是纯文本归纳，图像送进去：
- *   1. 浪费上下文（vision 模型对图像有显著 token 成本）
- *   2. 大概率拖慢响应（多模态推理慢于纯文本）
- *   3. 文本-only 模型直接报错
- *
- * 图像条目替换为简短文本占位（保留"曾经有图像"的语义信号）。
- */
-function stripImagesForCompact(
-  messages: vscode.LanguageModelChatMessage[],
-): vscode.LanguageModelChatMessage[] {
-  if (!config.agent.stripImagesInCompact) return messages
-
-  return messages.map((msg) => {
-    const content = msg.content as vscode.LanguageModelInputPart[]
-    let mutated = false
-
-    const newContent: vscode.LanguageModelInputPart[] = []
-    for (const part of content) {
-      // 顶层 DataPart（罕见，但 API 允许）：直接替换为占位文本
-      if (part instanceof vscode.LanguageModelDataPart) {
-        mutated = true
-        newContent.push(new vscode.LanguageModelTextPart('[image omitted for summary]'))
-        continue
-      }
-      // ToolResultPart 内嵌的 DataPart：拆开重组，仅保留文本
-      if (part instanceof vscode.LanguageModelToolResultPart) {
-        let innerMutated = false
-        // ToolResultPart.content 类型签名包含 unknown，这里手动收窄为可构造类型
-        const filteredInner: unknown[] = []
-        for (const inner of part.content) {
-          if (inner instanceof vscode.LanguageModelDataPart) {
-            innerMutated = true
-            filteredInner.push(new vscode.LanguageModelTextPart('[image omitted for summary]'))
-          } else {
-            filteredInner.push(inner)
-          }
-        }
-        if (innerMutated) {
-          mutated = true
-          newContent.push(new vscode.LanguageModelToolResultPart(part.callId, filteredInner))
-        } else {
-          newContent.push(part)
-        }
-        continue
-      }
-      newContent.push(part)
-    }
-
-    return mutated ? cloneMessageWithContent(msg, newContent) : msg
-  })
-}
 
 /**
  * 构建工作区静态上下文（注入到 Prompt 层 3，作为 KV 缓存的稳定前缀锚点）
@@ -411,15 +280,10 @@ async function buildHistoryMessages(
     return raw.slice(-maxHistoryTurns)
   }
 
-  // 超过阈值：尝试 LLM 摘要压缩
+  // 超过阈值：尝试 LLM 摘要压缩（内部自动读取 config.compact + 获取压缩 Adapter）
   log(`[Context] 历史消息数 ${raw.length} 超过阈值 ${compactThreshold}，尝试 LLM 摘要压缩`)
-  try {
-    return await compactHistoryWithLLM(raw)
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    log(`[Context] 历史压缩失败，降级为截断：${msg}`)
-    return raw.slice(-maxHistoryTurns)
-  }
+
+  return initCompactHistory(raw, maxHistoryTurns)
 }
 
 /**
@@ -448,55 +312,4 @@ function convertChatHistoryToMessages(
   }
 
   return messages
-}
-
-/**
- * 通过激活的 LLM Adapter 生成历史摘要，返回 [摘要 User 消息, Assistant 接续确认] 两条消息。
- */
-async function compactHistoryWithLLM(
-  messages: vscode.LanguageModelChatMessage[],
-): Promise<vscode.LanguageModelChatMessage[]> {
-  const adapter = getActiveAdapter()
-
-  // 摘要任务对图像无意义且代价高，先剥离 DataPart 再送给 LLM
-  const sanitized = stripImagesForCompact(messages)
-
-  const compactRequest: vscode.LanguageModelChatMessage[] = [
-    vscode.LanguageModelChatMessage.User(COMPACT_SYSTEM_PROMPT),
-    ...sanitized,
-    vscode.LanguageModelChatMessage.User('Generate the summary in the format described above.'),
-  ]
-
-  const abortController = new AbortController()
-  // 超时保护：压缩是辅助优化，不应阻塞 Agent 初始化
-  const timeoutId = setTimeout(() => abortController.abort(), COMPACT_TIMEOUT_MS)
-
-  let summary = ''
-  try {
-    for await (const part of adapter.chat({
-      messages: compactRequest,
-      tools: [],
-      signal: abortController.signal,
-    })) {
-      if (part instanceof vscode.LanguageModelTextPart) {
-        summary += part.value
-      }
-    }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    throw new Error(`LLM 摘要调用失败：${msg}`)
-  } finally {
-    clearTimeout(timeoutId)
-  }
-
-  if (!summary.trim()) throw new Error('LLM 返回空摘要')
-
-  log(`[Context] 历史压缩完成，摘要长度：${summary.length} 字符`)
-
-  return [
-    vscode.LanguageModelChatMessage.User(
-      `[Conversation history summary — earlier turns were compacted due to context limits]\n\n${summary}`,
-    ),
-    vscode.LanguageModelChatMessage.Assistant(COMPACT_ACK),
-  ]
 }

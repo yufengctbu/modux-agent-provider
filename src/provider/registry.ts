@@ -14,7 +14,7 @@ import type { LlmAdapter, LlmAdapterFactory } from './types'
 // 按类型查找：getAdapterByType(type) 根据 type 在 config.llms 中查找配置并
 //   实例化，结果按 type 独立缓存，与 active 互不干扰。
 //
-// 配置热切换：本阶段不支持。修改 config.json 需重新构建扩展；测试可用
+// 配置热切换：本阶段不支持。修改 config.ts 需重新构建扩展；测试可用
 // resetActiveAdapter() 清空缓存。
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -97,4 +97,61 @@ export function getAdapterByType(type: string): LlmAdapter {
   const adapter = factory.create(cfg)
   adapterCache.set(type, adapter)
   return adapter
+}
+
+/**
+ * 从任意配置对象创建 Adapter 实例（不缓存，每次调用返回新实例）。
+ *
+ * 用于需要独立 Adapter 配置的场景（如 compact.llm 压缩专用配置），
+ * 与 getActiveAdapter() / getAdapterByType() 的缓存逻辑互不干扰。
+ *
+ * @param entryConfig  适配器配置，必须包含 `type` 字段
+ * @throws type 缺失或工厂未注册时抛错
+ */
+export function createAdapterFromEntry(entryConfig: Record<string, unknown>): LlmAdapter {
+  const type = typeof entryConfig['type'] === 'string' ? entryConfig['type'] : undefined
+  if (!type) {
+    throw new Error('createAdapterFromEntry：配置对象缺少 type 字段')
+  }
+  const factory = factories.get(type)
+  if (!factory) {
+    throw new Error(
+      `createAdapterFromEntry：未知适配器类型 ${type}（已注册：${[...factories.keys()].join(', ') || '无'}）`,
+    )
+  }
+  log(`[Registry] 创建独立 Adapter 实例：type=${type}`)
+  return factory.create(entryConfig)
+}
+
+/** 压缩专用 Adapter 缓存（独立于 active，懒加载） */
+let compactAdapter: LlmAdapter | null = null
+
+/**
+ * 获取用于上下文压缩的 LLM Adapter。
+ *
+ * 优先使用 config.compact.llm 中的专用配置（适合配置轻量/低成本模型做摘要）；
+ * 未配置时回退到当前激活的主 Adapter。
+ *
+ * 结果按进程生命周期缓存（与 active 独立），可通过 resetCompactAdapter() 清空。
+ */
+export function getCompactAdapter(): LlmAdapter {
+  if (compactAdapter) return compactAdapter
+
+  const compactLlmCfg = config.compact.llm as Record<string, unknown> | undefined
+
+  if (compactLlmCfg && typeof compactLlmCfg['type'] === 'string') {
+    log(`[Registry] 初始化压缩专用 Adapter：type=${compactLlmCfg['type']}`)
+    compactAdapter = createAdapterFromEntry(compactLlmCfg)
+    return compactAdapter
+  }
+
+  log('[Registry] 未配置压缩专用 LLM，回退到激活 Adapter')
+  return getActiveAdapter()
+}
+
+/**
+ * 重置压缩专用 Adapter 缓存（仅用于测试）
+ */
+export function resetCompactAdapter(): void {
+  compactAdapter = null
 }

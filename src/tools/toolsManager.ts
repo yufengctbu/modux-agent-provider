@@ -26,7 +26,7 @@ import type { ModuxTool, ToolExecuteContext, ToolResult } from './types'
 const DEFAULT_TOOL_RESULT_MAX_CHARS = 20_000
 
 /**
- * config.json 键名（camelCase）→ 工具 name（snake_case）映射表
+ * config.ts 键名（camelCase）→ 工具 name（snake_case）映射表
  *
  * config.tools 使用 camelCase（符合 JSON 约定），工具 name 使用 snake_case（符合 LLM 工具调用约定）。
  */
