@@ -18,8 +18,7 @@
       "apiKey": "sk-e998f1381b9c4af09204baed38d64b46",
       "model": "deepseek-v4-pro",
       "baseUrl": "https://api.deepseek.com",
-      "thinkingMode": "auto",
-      "maxTokens": 8192
+      "thinkingMode": true
     }
   ],
   "tools": {
