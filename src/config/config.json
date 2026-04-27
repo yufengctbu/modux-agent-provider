@@ -16,7 +16,7 @@
       "type": "deepseek",
       "enabled": true,
       "apiKey": "sk-e998f1381b9c4af09204baed38d64b46",
-      "model": "deepseek-v4-flash",
+      "model": "deepseek-v4-pro",
       "baseUrl": "https://api.deepseek.com"
     }
   ],

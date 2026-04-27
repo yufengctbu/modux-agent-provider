@@ -1,0 +1,16 @@
+.vscode/**
+.git/**
+.github/**
+node_modules/**
+src/**
+.gitignore
+.editorconfig
+.prettierrc
+eslint.config.mjs
+tsconfig.json
+vite.config.ts
+PLAN.md
+pnpm-lock.yaml
+*.vsix
+*.log
+.DS_Store
