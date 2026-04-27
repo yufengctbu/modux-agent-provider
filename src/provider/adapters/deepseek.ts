@@ -135,18 +135,28 @@ interface DeepSeekConfig {
   /** 是否验证 TLS 证书，默认 true；企业代理/自签证书环境可设为 false */
   readonly rejectUnauthorized: boolean
   /**
-   * 是否启用 thinking（思考）模式，默认 false
+   * thinking 模式控制（推荐使用 'auto'，由任务类型自动决定）
    *
-   * true  → 请求中传 thinking: { type: 'enabled' }，模型产出 reasoning_content
-   *          可提升复杂推理任务的质量，但 reasoning_content 按输出价格计费
-   *          （v4-pro: 6元/M promo / 24元/M regular）
-   * false → 请求中传 thinking: { type: 'disabled' }，不产出 reasoning_content
-   *          Agent 工具调用场景推荐关闭，可节省 50-90% 输出 token 费用
+   * 'auto'  → 自动检测：含分析/架构/调试类关键词时自动开启，普通编码任务关闭
+   *            多轮任务中若前一轮已产出 reasoning_content，后续轮次自动维持 thinking
+   * true    → 始终开启（所有任务都使用 CoT 推理，输出费用较高）
+   * false   → 始终关闭（最省 token）
    *
-   * 注意：此开关只控制本轮是否产出新的 reasoning_content，不影响历史消息中
-   * 已存在的 reasoning_content 字段（由 toDeepSeekMessages 保证非空）。
+   * 费用影响：thinking 开启时 reasoning_content 按输出价格计费
+   * （v4-pro: 6元/M promo → 24元/M 正式；复杂任务才值得开）
    */
-  readonly thinkingEnabled: boolean
+  readonly thinkingMode: 'auto' | boolean
+  /**
+   * 最大输出 token 数（对应 max_tokens 参数）。
+   * 不设置时使用 DeepSeek 默认值（上限 384K），可能导致极长响应造成高输出计费。
+   * 推荐值：8192（足够绝大多数代码任务，防止意外长响应）。
+   */
+  readonly maxTokens?: number
+  /**
+   * 采样温度（0–2）。非思考模式默认为 1；coding Agent 场景推荐 0–0.3 以减少冗余输出。
+   * 注意：thinking 模式开启时 DeepSeek 不允许设置 temperature，请勿同时启用。
+   */
+  readonly temperature?: number
   /**
    * 模型是否支持视觉（multimodal input）。
    * true  → 图像以 OpenAI 兼容的 image_url(data URL) 格式回传
@@ -287,7 +297,29 @@ class DeepSeekAdapter implements LlmAdapter {
       throw new Error('DeepSeek 适配器未配置 apiKey，请在 config.json 中填写 deepseek.apiKey')
     }
 
-    const { messages, placeholderInjected } = this.toDeepSeekMessages(req.messages)
+    // ── 解析本次任务的 thinking 模式 ──────────────────────────────────────────
+    // 'auto'（推荐）: 先检查历史是否已用 thinking（保持多轮一致），再按关键词判断任务复杂度
+    // true / false : 固定开启 / 关闭
+    let effectiveThinking: boolean
+    if (this.cfg.thinkingMode === true) {
+      effectiveThinking = true
+    } else if (this.cfg.thinkingMode === false) {
+      effectiveThinking = false
+    } else {
+      // auto: 历史中已有 ThinkingPart → 保持一致；否则用关键词检测任务复杂度
+      const hasExistingThinking = req.messages.some((m) => {
+        if (m.role !== vscode.LanguageModelChatMessageRole.Assistant) return false
+        const parts = Array.isArray(m.content) ? (m.content as unknown[]) : [m.content]
+        return parts.some((p) => extractThinkingPartText(p) !== undefined)
+      })
+      effectiveThinking =
+        hasExistingThinking || needsDeepThinking(collectUserPromptText(req.messages))
+    }
+
+    const { messages, placeholderInjected } = this.toDeepSeekMessages(
+      req.messages,
+      effectiveThinking,
+    )
     const tools = req.tools.length > 0 ? toDeepSeekTools(req.tools) : undefined
 
     // 注意：DeepSeek 服务端对带 tool_calls 的历史 assistant 消息强制要求
@@ -311,19 +343,29 @@ class DeepSeekAdapter implements LlmAdapter {
     //
     // 注意：thinking:{type:'disabled'} 只控制本轮是否**产出** reasoning_content，
     // 不影响历史消息中已存在的 reasoning_content 字段（由 toDeepSeekMessages 保证非空）。
-    const thinkingType = this.cfg.thinkingEnabled ? 'enabled' : 'disabled'
+    const thinkingType = effectiveThinking ? 'enabled' : 'disabled'
     const body = JSON.stringify({
       model: this.cfg.model,
       messages,
       ...(tools ? { tools } : {}),
       ...(toolChoice ? { tool_choice: toolChoice } : {}),
       stream: true,
+      // stream_options 必须设置，否则 DeepSeek SSE 最后一块不包含 usage 数据，
+      // KV 缓存命中率日志（prompt_cache_hit_tokens）将永远不会打印。
+      stream_options: { include_usage: true },
       thinking: { type: thinkingType },
+      // max_tokens：防止意外长响应导致输出 token 费用失控（默认最大 384K）
+      ...(this.cfg.maxTokens ? { max_tokens: this.cfg.maxTokens } : {}),
+      // temperature：非思考模式下可设低值减少冗余输出；thinking 模式下不传（服务端控制）
+      ...(!effectiveThinking && this.cfg.temperature !== undefined
+        ? { temperature: this.cfg.temperature }
+        : {}),
     })
 
     log(
-      `[DeepSeek Adapter] 发起请求：model=${this.cfg.model}，messages=${messages.length}，thinking=${thinkingType}` +
-        (placeholderInjected ? '（部分历史 reasoning_content 缺失，已注入占位符兜底）' : ''),
+      `[DeepSeek Adapter] 发起请求：model=${this.cfg.model}，messages=${messages.length}` +
+        `，thinking=${thinkingType}${this.cfg.thinkingMode === 'auto' ? '（auto检测）' : ''}` +
+        (placeholderInjected ? '，部分历史 reasoning_content 缺失，已注入占位符兜底' : ''),
     )
 
     let incoming: http.IncomingMessage
@@ -611,7 +653,10 @@ class DeepSeekAdapter implements LlmAdapter {
    * @returns placeholderInjected   是否对至少一条 tool_calls assistant 注入了占位符
    *                                （仅用于诊断日志，不影响请求行为）
    */
-  private toDeepSeekMessages(messages: readonly vscode.LanguageModelChatMessage[]): {
+  private toDeepSeekMessages(
+    messages: readonly vscode.LanguageModelChatMessage[],
+    effectiveThinking: boolean,
+  ): {
     messages: DeepSeekMessage[]
     placeholderInjected: boolean
   } {
@@ -657,24 +702,33 @@ class DeepSeekAdapter implements LlmAdapter {
         const cacheHit = fingerprint ? this.reasoningCache.has(fingerprint) : false
         const cachedReasoning = cacheHit ? (this.reasoningCache.get(fingerprint) ?? '') : ''
 
-        // 所有 assistant 消息（含纯文本）统一三层兜底，保证 reasoning_content 非空。
-        // 详见文件头注释；这里不再区分 tool_calls / 纯文本——文档说纯文本的
-        // reasoning_content 会被忽略，传入是无害的，缺字段反而可能 400。
-        let reasoningContent: string
+        // reasoning_content 三层来源策略：
+        //   1. 历史 ThinkingPart（thinking 模式开启时 VS Code/Cursor 保留）
+        //   2. 内存缓存（按 callId / 文本指纹，本进程内跨轮次）
+        //   3. MISSING_REASONING_PLACEHOLDER 兜底
+        //      ⚠️  仅在 effectiveThinking=true 时注入占位符：
+        //      - thinking 关闭时 API 不产出 reasoning_content，无需兜底
+        //        （注入反而多费 ~58 token/条）
+        //      - thinking 开启时历史 tool_calls assistant 要求 reasoning_content 非空，
+        //        缺失才注入占位符（见文件头注释）
+        let reasoningContent: string | undefined
         if (hasThinkingInHistory && thinkingFromHistory.length > 0) {
           reasoningContent = thinkingFromHistory
         } else if (cacheHit && cachedReasoning.length > 0) {
           reasoningContent = cachedReasoning
-        } else {
+        } else if (effectiveThinking) {
+          // thinking 开启但无实际 reasoning 可用：注入占位符保证服务端校验通过
           reasoningContent = MISSING_REASONING_PLACEHOLDER
           placeholderInjected = true
         }
+        // effectiveThinking=false 且无实际 reasoning：reasoning_content 保持 undefined，
+        // 不向请求中写入此字段，节省约 58 tokens/条
 
         if (toolCallInfos.length > 0) {
           result.push({
             role: 'assistant',
             content: cleanText.length > 0 ? cleanText : null,
-            reasoning_content: reasoningContent,
+            ...(reasoningContent !== undefined ? { reasoning_content: reasoningContent } : {}),
             tool_calls: toolCallInfos.map((tc) => ({
               id: tc.callId,
               type: 'function',
@@ -688,7 +742,7 @@ class DeepSeekAdapter implements LlmAdapter {
           result.push({
             role: 'assistant',
             content: cleanText,
-            reasoning_content: reasoningContent,
+            ...(reasoningContent !== undefined ? { reasoning_content: reasoningContent } : {}),
           })
         }
       } else {
@@ -915,6 +969,72 @@ function toDeepSeekTools(tools: readonly vscode.LanguageModelChatTool[]): DeepSe
 
 // ── 工厂自注册 ────────────────────────────────────────────────────────────────
 
+/**
+ * 判断任务是否需要 thinking 模式（深度推理）
+ *
+ * 触发信号：分析/解释/架构/调试/算法等关键词
+ * 普通编码任务（添加文件、修改代码、运行命令）不触发，以节省输出 token 费用。
+ */
+function needsDeepThinking(text: string): boolean {
+  const lower = text.toLowerCase()
+  return [
+    // 中文：分析推理信号
+    '为什么',
+    '原因是',
+    '怎么回事',
+    '分析',
+    '架构',
+    '设计方案',
+    '重构方案',
+    '诊断',
+    '排查',
+    '审查',
+    '评审',
+    '优化策略',
+    '算法',
+    // 英文：analysis/reasoning signals
+    'why ',
+    'why?',
+    'explain why',
+    'analyze',
+    'architect',
+    'design pattern',
+    'diagnose',
+    'root cause',
+    'algorithm',
+    'complexity',
+    'code review',
+    'security audit',
+    'best approach',
+    'best strategy',
+  ].some((kw) => lower.includes(kw))
+}
+
+/**
+ * 收集当前请求的用户提示文本（跳过工具结果），供 thinkingMode='auto' 做复杂度检测。
+ * 只取纯文本 User 消息，最多保留末尾 2000 字符。
+ */
+function collectUserPromptText(messages: readonly vscode.LanguageModelChatMessage[]): string {
+  const chunks: string[] = []
+  for (const msg of messages) {
+    if (msg.role !== vscode.LanguageModelChatMessageRole.User) continue
+    const parts = Array.isArray(msg.content) ? (msg.content as unknown[]) : [msg.content]
+    for (const p of parts) {
+      // 跳过工具结果 part（大块输出，不代表用户意图）
+      if (p instanceof vscode.LanguageModelToolResultPart) continue
+      const obj = p as Record<string, unknown>
+      if (typeof obj?.callId === 'string' && Array.isArray(obj?.content)) continue
+      // 提取文本
+      if (p instanceof vscode.LanguageModelTextPart) {
+        chunks.push(p.value)
+      } else if (typeof obj?.value === 'string' && !('callId' in obj)) {
+        chunks.push(obj.value as string)
+      }
+    }
+  }
+  return chunks.join(' ').slice(-2000)
+}
+
 const factory: LlmAdapterFactory = {
   type: 'deepseek',
   create(cfg) {
@@ -922,14 +1042,21 @@ const factory: LlmAdapterFactory = {
     const model = typeof cfg.model === 'string' ? cfg.model : 'deepseek-v4-flash'
     const baseUrl = typeof cfg.baseUrl === 'string' ? cfg.baseUrl : 'https://api.deepseek.com'
     const rejectUnauthorized = cfg.rejectUnauthorized !== false // 默认 true
-    const thinkingEnabled = cfg.thinkingEnabled === true // 默认 false（省 token）
-    const supportsVision = cfg.supportsVision === true // 默认 false（DeepSeek 主流模型无视觉）
+    // 支持新字段 thinkingMode（'auto' | boolean）和旧字段 thinkingEnabled（boolean）
+    const rawMode = 'thinkingMode' in cfg ? cfg.thinkingMode : cfg.thinkingEnabled
+    const thinkingMode: 'auto' | boolean =
+      rawMode === 'auto' ? 'auto' : rawMode === true ? true : false
+    const maxTokens = typeof cfg.maxTokens === 'number' ? cfg.maxTokens : undefined
+    const temperature = typeof cfg.temperature === 'number' ? cfg.temperature : undefined
+    const supportsVision = cfg.supportsVision === true
     return new DeepSeekAdapter({
       apiKey,
       model,
       baseUrl,
       rejectUnauthorized,
-      thinkingEnabled,
+      thinkingMode,
+      maxTokens,
+      temperature,
       supportsVision,
     })
   },

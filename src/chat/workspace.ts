@@ -109,7 +109,7 @@ async function collectWorkspaceContext(): Promise<WorkspaceContext> {
         ? s.slice(0, MAX_GIT_STATUS_CHARS) + '\n... [git status truncated]'
         : s,
     ),
-    runGitCommand(projectRoot, ['log', '--oneline', '-n', '5']),
+    runGitCommand(projectRoot, ['log', '--oneline', '-n', '3']),
   ])
 
   cachedWorkspaceContext = {
