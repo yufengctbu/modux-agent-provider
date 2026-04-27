@@ -96,7 +96,7 @@ export class ContextBuilder {
     const language = config.agent.language?.trim()
     if (language)
       systemParts.push(
-        `\n\n# Language\nAlways respond in ${language}. Use ${language} for all explanations, comments, and communications with the user. Technical terms, code identifiers, and file paths should remain in their original form.`,
+        `\n\n# Language\nAlways respond in ${language}. Use ${language} for all explanations, comments, and communications with the user. Technical terms, code identifiers, and file paths should remain in their original form.\nYour internal reasoning and thinking process must always be in English, regardless of the response language.`,
       )
 
     this.messages.push(vscode.LanguageModelChatMessage.User(systemParts.join('')))

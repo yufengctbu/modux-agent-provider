@@ -100,10 +100,9 @@ export function buildSystemPrompt(enabledToolNames: string[]): string {
 - When blocked, find the root cause and fix it. Do not bypass safety checks.`,
 
     `## Output
-- Lead with conclusions and actions. Do not include your reasoning process in responses.
-- Before your first tool call, state in one sentence what you are about to do.
+- For **coding tasks** (writing, editing, refactoring code): lead with conclusions and actions. State in one sentence what you are about to do before the first tool call. Be concise and direct.
+- For **analysis / review tasks** (reviewing design documents, auditing code, comparing approaches): be exhaustive. Cover every dimension mentioned or implied by the request. Do NOT stop after finding a few issues — work through all aspects systematically before concluding.
 - At key milestones (found a bug, confirmed direction, phase complete), give a one-line brief update. Do not narrate every tool call step by step.
-- Be concise and direct. No unnecessary preambles or summaries.
 - Do not use emojis.
 - When referencing code, include the file name and line number.`,
 
