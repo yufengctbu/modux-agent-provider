@@ -142,7 +142,8 @@ export async function runAgentLoop(
         : contextBuilder.buildForContinuationRound()
 
     // ── Layer 3：Token 感知自动压缩（内部处理阈值判断、熔断、写回）────────
-    messages = await compactMgr.applyAutoCompact(messages)
+    // 将工具定义 token 一并纳入预算，使阈值在正确时机触发
+    messages = await compactMgr.applyAutoCompact(messages, toolDefTokens)
 
     // ── 单次 LLM 调用，按 Part 类型分流收集 ──────────────────────────────────
     const textParts: vscode.LanguageModelTextPart[] = []
@@ -202,8 +203,11 @@ export async function runAgentLoop(
       cancelDisposable.dispose()
     }
 
-    // 将本轮 assistant 消息（文本 + 工具调用）写入上下文
-    contextBuilder.appendAssistantTurn(textParts, toolCalls)
+    // 将本轮 assistant 消息（文本 + 工具调用 + 推理内容）写入上下文。
+    // 推理内容（thinkingBuf）作为鸭子类型 ThinkingPart 存入历史，使 token 估算器
+    // 能正确计算 reasoning_content 在实际 API payload 中的 token 开销，
+    // 避免低估导致 context_too_long 错误触发不必要的 reactive compact。
+    contextBuilder.appendAssistantTurn(textParts, toolCalls, thinkingBuf || undefined)
     log(`[Loop] 第 ${round} 轮完成，文本段=${textParts.length}，工具调用=${toolCalls.length}`)
 
     // ── 无工具调用：任务完成，结束循环 ───────────────────────────────────────

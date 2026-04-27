@@ -101,8 +101,10 @@ export const config = {
     timeoutMs: 30_000,
 
     // PTL 渐进截断重试最大次数（Layer 5）
-    // 每次重试丢弃最旧 20% 历史，三次后约剩 51%
-    maxPtlRetries: 3,
+    // 每次重试丢弃最旧 20% 历史，一次重试后历史约压缩到 80%，通常足以解决上下文溢出。
+    // 注：修复 reasoning_content token 估算后，第一次 LLM 压缩尝试成功率大幅提升，
+    //     无需保留 3 次重试。降为 1 可将每次 compact 触发的最大 API 调用数从 4 降到 2。
+    maxPtlRetries: 1,
 
     // ── Layer 3：Token 感知自动压缩 ──────────────────────────────────────────
     // 是否在每轮 LLM 调用前检测 token 预算

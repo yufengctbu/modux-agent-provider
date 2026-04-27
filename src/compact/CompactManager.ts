@@ -91,6 +91,8 @@ export class CompactManager {
    */
   async applyAutoCompact(
     messages: vscode.LanguageModelChatMessage[],
+    /** 消息内容以外的额外 token 开销（如工具定义列表），纳入预算避免阈值触发过晚 */
+    extraTokens = 0,
   ): Promise<vscode.LanguageModelChatMessage[]> {
     if (!config.agent.compactHistoryEnabled || !config.compact.autoEnabled) {
       return messages
@@ -98,7 +100,7 @@ export class CompactManager {
 
     const contextWindowSize = (this.mainAdapter as { contextWindowSize?: number }).contextWindowSize
     const window = contextWindowSize ?? 32_000
-    const tokenEstimate = estimateAllMessagesTokens(messages)
+    const tokenEstimate = estimateAllMessagesTokens(messages) + extraTokens
 
     log(`[Compact] token ≈ ${tokenEstimate.toLocaleString()} / ${window.toLocaleString()}`)
 

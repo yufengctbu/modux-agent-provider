@@ -162,14 +162,37 @@ export class ContextBuilder {
   // ── 消息追加 ───────────────────────────────────────────────────────────────
 
   /**
-   * 追加本轮 Assistant 回复（含文本和工具调用部分）
-   * 确保下一轮 LLM 能看到"自己说了什么、调用了什么工具"。
+   * 追加本轮 Assistant 回复（含文本、工具调用、以及可选的推理内容）。
+   *
+   * reasoningText 以鸭子类型 ThinkingPart 形式存入消息历史（{ value, id, metadata }），
+   * 这样做的收益：
+   *   1. estimateMessageTokens 能通过 `'value' in part` 分支统计到 reasoning_content
+   *      的实际 token 开销，避免低估导致 autoCompact 阈值不触发、reactive compact 频繁报错。
+   *   2. toDeepSeekMessages 优先从消息历史（Tier 1）提取 reasoning_content，
+   *      不再依赖内存 reasoningCache（Tier 2），多轮一致性更强。
    */
   appendAssistantTurn(
     textParts: vscode.LanguageModelTextPart[],
     toolCalls: vscode.LanguageModelToolCallPart[],
+    reasoningText?: string,
   ): void {
-    this.messages.push(vscode.LanguageModelChatMessage.Assistant([...textParts, ...toolCalls]))
+    const parts: (vscode.LanguageModelTextPart | vscode.LanguageModelToolCallPart)[] = [
+      ...textParts,
+      ...toolCalls,
+    ]
+    if (reasoningText) {
+      // 鸭子类型 ThinkingPart：与 extractThinkingPartText / isThinkingPart 兼容
+      // （有 value:string + metadata:{}，且无 callId）
+      const thinkingLike = { value: reasoningText, id: 'reasoning', metadata: {} }
+      this.messages.push(
+        vscode.LanguageModelChatMessage.Assistant([thinkingLike, ...parts] as (
+          | vscode.LanguageModelTextPart
+          | vscode.LanguageModelToolCallPart
+        )[]),
+      )
+    } else {
+      this.messages.push(vscode.LanguageModelChatMessage.Assistant(parts))
+    }
   }
 
   /**

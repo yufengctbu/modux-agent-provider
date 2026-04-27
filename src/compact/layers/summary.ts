@@ -1,6 +1,6 @@
 import * as vscode from 'vscode'
 import type { CompactResult, CompactWithLlmOptions } from '../types'
-import { stripImagesForCompact } from './stripImages'
+import { stripImagesForCompact, stripThinkingPartsForCompact } from './stripImages'
 import { truncateMessages } from './truncate'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -68,10 +68,11 @@ const COMPACT_TRIGGER_PROMPT =
  * 单次 LLM 摘要压缩（不含重试逻辑）。
  *
  * 流程：
- *   1. 剥离图像 DataPart（Layer 2，节省 token）
- *   2. 组装 [system, ...history, trigger] 消息列表
- *   3. 调用 LLM，带超时 + 外部取消信号
- *   4. 验证摘要非空后返回 [摘要User, 接续确认Assistant]
+ *   1. 剥离思考块 ThinkingPart（主模型推理过程，压缩模型不需要）
+ *   2. 剥离图像 DataPart（Layer 2，节省 token）
+ *   3. 组装 [system, ...history, trigger] 消息列表
+ *   4. 调用 LLM，带超时 + 外部取消信号
+ *   5. 验证摘要非空后返回 [摘要User, 接续确认Assistant]
  *
  * @param historyMessages  不含固定前缀的历史消息
  * @param opts             调用参数（适配器 / 超时 / 取消信号）
@@ -82,7 +83,11 @@ export async function compactWithLlm(
   opts: CompactWithLlmOptions,
   stripImages = true,
 ): Promise<CompactResult> {
-  const sanitized = stripImages ? stripImagesForCompact(historyMessages, true) : historyMessages
+  // 先剥离思考块：主模型的 reasoning_content 对摘要任务没有价值，
+  // 保留会导致 toDeepSeekMessages 把它们序列化为 reasoning_content 字段，
+  // 产生不必要的压缩模型输入 token 开销。
+  const withoutThinking = stripThinkingPartsForCompact(historyMessages)
+  const sanitized = stripImages ? stripImagesForCompact(withoutThinking, true) : withoutThinking
 
   const requestMessages: vscode.LanguageModelChatMessage[] = [
     vscode.LanguageModelChatMessage.User(COMPACT_SYSTEM_PROMPT),
