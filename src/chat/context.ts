@@ -71,12 +71,15 @@ export class ContextBuilder {
   private readonly wsCtx: WorkspaceContext
 
   /**
-   * @param wsCtx    工作区上下文（git 信息等），稳定部分注入层 3，动态部分注入每轮首个用户消息前
-   * @param history  Copilot Chat 传入的对话历史（跨 Turn），注入到层 4
+   * @param wsCtx     工作区上下文（git 信息等），稳定部分注入层 3，动态部分注入每轮首个用户消息前
+   * @param history   Copilot Chat 传入的对话历史（跨 Turn），注入到层 4
+   * @param toolNames 向 LLM 声明的工具名列表，用于构建 System Prompt 的 Tool usage 节。
+   *                  由 loop.ts 在工具过滤（routing.toolWhitelist）后传入，确保
+   *                  System Prompt 与实际注入工具列表一致，避免"描述了但调不到"的混淆。
    */
-  constructor(wsCtx: WorkspaceContext, history: vscode.ChatContext) {
+  constructor(wsCtx: WorkspaceContext, history: vscode.ChatContext, toolNames: string[]) {
     this.wsCtx = wsCtx
-    this.ready = this.initializeAsync(wsCtx, history)
+    this.ready = this.initializeAsync(wsCtx, history, toolNames)
   }
 
   /**
@@ -85,12 +88,13 @@ export class ContextBuilder {
   private async initializeAsync(
     wsCtx: WorkspaceContext,
     history: vscode.ChatContext,
+    toolNames: string[],
   ): Promise<void> {
     // ── 层 1：System Prompt（用 User 角色模拟） ──────────────────────────────
     const memoryContent = await loadMemoryFile(wsCtx.projectRoot)
     const userSystemPrompt = config.agent.systemPrompt?.trim()
 
-    const systemParts = [buildSystemPrompt(toolsManager.getAvailableTools().map((t) => t.name))]
+    const systemParts = [buildSystemPrompt(toolNames)]
     if (userSystemPrompt) systemParts.push(`\n\n## User Custom Instructions\n${userSystemPrompt}`)
     if (memoryContent) systemParts.push(`\n\n## Project Instructions (Memory)\n${memoryContent}`)
     const language = config.agent.language?.trim()

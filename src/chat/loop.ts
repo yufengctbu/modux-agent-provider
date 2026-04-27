@@ -104,17 +104,24 @@ export async function runAgentLoop(
     return
   }
 
-  const contextBuilder = new ContextBuilder(wsCtx, history)
-  // 防御：maxLoopRounds 可能是 NaN/undefined/负数，归一为 [1, 50] 之间的整数
-  const rawMaxRounds = Number(config.agent.maxLoopRounds)
-  const maxRounds =
-    Number.isFinite(rawMaxRounds) && rawMaxRounds > 0 ? Math.min(50, Math.floor(rawMaxRounds)) : 5
-
   // 工具列表与定义 token 在整个 loop 内通常不变，提到循环外算一次即可，
   // 避免每轮重复 JSON.stringify(schema) 的开销。
   const tools = toolsManager.getAvailableTools()
   const toolDefTokens = estimateToolDefinitions(tools)
   log(`[Loop] 工具定义 token 估算 ≈ ${toolDefTokens}（共 ${tools.length} 个工具）`)
+
+  // 防御：maxLoopRounds 可能是 NaN/undefined/负数，归一为 [1, 50] 之间的整数
+  const rawMaxRounds = Number(config.agent.maxLoopRounds)
+  const maxRounds =
+    Number.isFinite(rawMaxRounds) && rawMaxRounds > 0 ? Math.min(50, Math.floor(rawMaxRounds)) : 5
+
+  // ContextBuilder 在此处构造，工具名已确定，System Prompt 与实际注入工具列表保持一致。
+  // 未来 routing.toolWhitelist 过滤后，只需把过滤结果传入，两者仍然同步。
+  const contextBuilder = new ContextBuilder(
+    wsCtx,
+    history,
+    tools.map((t) => t.name),
+  )
 
   for (let round = 1; round <= maxRounds; round++) {
     if (token.isCancellationRequested) {

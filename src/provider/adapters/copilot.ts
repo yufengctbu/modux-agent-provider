@@ -86,7 +86,9 @@ class CopilotAdapter implements LlmAdapter {
       // 触发场景：Copilot token 失效、用户切换账号、模型 family 被服务端下线等。
       // 取消（CancellationError）不算缓存失效原因，跳过清理。
       if (!req.signal.aborted) {
-        log(`[Copilot Adapter] sendRequest 失败，失效模型缓存：${err instanceof Error ? err.message : String(err)}`)
+        log(
+          `[Copilot Adapter] sendRequest 失败，失效模型缓存：${err instanceof Error ? err.message : String(err)}`,
+        )
         this.cachedModel = undefined
         this.cachedModelTs = 0
       }
