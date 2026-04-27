@@ -1,12 +1,6 @@
 {
   "llms": [
     {
-      "type": "copilot",
-      "enabled": false,
-      "vendor": "copilot",
-      "family": "gpt-4o"
-    },
-    {
       "type": "moduxBackend",
       "enabled": false,
       "url": "http://localhost:3000/v1/chat",

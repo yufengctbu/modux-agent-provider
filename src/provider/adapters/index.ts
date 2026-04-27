@@ -11,6 +11,5 @@
 //   3. 在 config/config.json 的 llms 数组中新增一条对应条目
 // ─────────────────────────────────────────────────────────────────────────────
 
-import './copilot'
 import './moduxBackend'
 import './deepseek'
