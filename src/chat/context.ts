@@ -67,11 +67,15 @@ export class ContextBuilder {
   /** 初始化是否已完成（initializeAsync 使用此 Promise 同步） */
   private readonly ready: Promise<void>
 
+  /** 工作区上下文，在 buildForFirstRound 中用于注入动态字段 */
+  private readonly wsCtx: WorkspaceContext
+
   /**
-   * @param wsCtx    工作区上下文（git 信息等），注入到层 3
+   * @param wsCtx    工作区上下文（git 信息等），稳定部分注入层 3，动态部分注入每轮首个用户消息前
    * @param history  Copilot Chat 传入的对话历史（跨 Turn），注入到层 4
    */
   constructor(wsCtx: WorkspaceContext, history: vscode.ChatContext) {
+    this.wsCtx = wsCtx
     this.ready = this.initializeAsync(wsCtx, history)
   }
 
@@ -100,9 +104,12 @@ export class ContextBuilder {
     // ── 层 2：Assistant 确认 ─────────────────────────────────────────────────
     this.messages.push(vscode.LanguageModelChatMessage.Assistant(SYSTEM_ACK))
 
-    // ── 层 3：工作区上下文 ───────────────────────────────────────────────────
-    const contextBlock = buildWorkspaceContextBlock(wsCtx)
-    this.messages.push(vscode.LanguageModelChatMessage.User(contextBlock))
+    // ── 层 3：工作区静态上下文（稳定前缀，最大化 KV 缓存命中） ──────────────
+    // 只注入不随日期或 git 操作变化的字段（projectRoot、gitBranch、gitMainBranch）。
+    // 动态字段（today、gitStatus、gitRecentCommits）在 buildForFirstRound 中
+    // 追加到消息列表末尾，避免破坏层 1-3 的稳定前缀缓存。
+    const stableBlock = buildStableWorkspaceBlock(wsCtx)
+    this.messages.push(vscode.LanguageModelChatMessage.User(stableBlock))
     this.messages.push(
       vscode.LanguageModelChatMessage.Assistant(
         'Understood. I have the current workspace context.',
@@ -119,14 +126,23 @@ export class ContextBuilder {
   /**
    * 构建首轮消息列表（历史 + 当前用户输入）
    * 只在 loop 第 1 轮调用，等待异步初始化完成后返回。
+   *
+   * 🪺 设计要点：
+   *   - 动态上下文（today、gitStatus）合并到用户 prompt 中，形成一条 User 消息，
+   *     同时写入 this.messages，确保后续轮次 LLM 仍能看到原始任务
+   *   - 合并后的消息在 Round 2+ 作为稳定前缀的一部分，不会破坏 KV 缓存公共前缀检测
+   *     （DeepSeek 在 2 轮后自动识别 Layer1-4 + 此消息作为公共前缀并落盘）
    */
   async buildForFirstRound(userPrompt: string): Promise<vscode.LanguageModelChatMessage[]> {
     await this.ready
-    const compacted = applyMicrocompaction([
-      ...this.messages,
-      vscode.LanguageModelChatMessage.User(userPrompt),
-    ])
-    return compacted
+    const dynamicBlock = buildDynamicContextBlock(this.wsCtx)
+    const fullPrompt = `${dynamicBlock}\n\n${userPrompt}`
+    const userMsg = vscode.LanguageModelChatMessage.User(fullPrompt)
+
+    // 将用户消息持久化到消息列表，确保 Round 2+ LLM 仍能看到原始任务
+    this.messages.push(userMsg)
+
+    return applyMicrocompaction(this.messages)
   }
 
   /**
@@ -348,12 +364,25 @@ function stripImagesForCompact(
   })
 }
 
-/** 构建工作区上下文文本块（注入到 Prompt 层 3） */
-function buildWorkspaceContextBlock(wsCtx: WorkspaceContext): string {
+/**
+ * 构建工作区静态上下文（注入到 Prompt 层 3，作为 KV 缓存的稳定前缀锚点）
+ * 只包含不随日期或 git 操作变化的字段：projectRoot、gitBranch、gitMainBranch
+ */
+function buildStableWorkspaceBlock(wsCtx: WorkspaceContext): string {
   return [
     `Current project: ${wsCtx.projectRoot}`,
-    `Today: ${wsCtx.today}`,
     `Git branch: ${wsCtx.gitBranch} (main branch: ${wsCtx.gitMainBranch})`,
+  ].join('\n')
+}
+
+/**
+ * 构建工作区动态上下文（注入到每轮首个用户消息之前）
+ * 包含随日期或 git 操作变化的字段：today、gitRecentCommits、gitStatus
+ * 放在消息末尾以保护稳定前缀（层 1-3）的 KV 缓存命中率
+ */
+function buildDynamicContextBlock(wsCtx: WorkspaceContext): string {
+  return [
+    `Today: ${wsCtx.today}`,
     `Recent commits:\n${wsCtx.gitRecentCommits}`,
     `Git status:\n${wsCtx.gitStatus}`,
   ].join('\n')

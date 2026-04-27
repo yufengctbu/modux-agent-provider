@@ -135,6 +135,19 @@ interface DeepSeekConfig {
   /** 是否验证 TLS 证书，默认 true；企业代理/自签证书环境可设为 false */
   readonly rejectUnauthorized: boolean
   /**
+   * 是否启用 thinking（思考）模式，默认 false
+   *
+   * true  → 请求中传 thinking: { type: 'enabled' }，模型产出 reasoning_content
+   *          可提升复杂推理任务的质量，但 reasoning_content 按输出价格计费
+   *          （v4-pro: 6元/M promo / 24元/M regular）
+   * false → 请求中传 thinking: { type: 'disabled' }，不产出 reasoning_content
+   *          Agent 工具调用场景推荐关闭，可节省 50-90% 输出 token 费用
+   *
+   * 注意：此开关只控制本轮是否产出新的 reasoning_content，不影响历史消息中
+   * 已存在的 reasoning_content 字段（由 toDeepSeekMessages 保证非空）。
+   */
+  readonly thinkingEnabled: boolean
+  /**
    * 模型是否支持视觉（multimodal input）。
    * true  → 图像以 OpenAI 兼容的 image_url(data URL) 格式回传
    * false → 图像剥离为简短文本占位，避免触发服务端 400
@@ -210,6 +223,13 @@ interface SseChunk {
     }
     finish_reason?: string | null
   }>
+  /** 最后一个 chunk 中返回的用量统计，含 KV 缓存命中情况 */
+  usage?: {
+    prompt_tokens?: number
+    completion_tokens?: number
+    prompt_cache_hit_tokens?: number
+    prompt_cache_miss_tokens?: number
+  }
 }
 
 /** 跨 SSE 块累积中的工具调用 */
@@ -283,16 +303,26 @@ class DeepSeekAdapter implements LlmAdapter {
         ? ('required' as const)
         : undefined
 
+    // 🪙 thinking 模式由 config.json 控制（默认关闭以节省输出 token）
+    //
+    // v4-pro 默认开启思考模式，reasoning_content 按输出价格（6元/M promo / 24元/M regular）
+    // 计费。Agent 工具调用场景不需要 CoT 推理，推荐关闭以节省 50-90% 输出 token 费用。
+    // 如需恢复思考模式（复杂推理任务），在 config.json 中设置 thinkingEnabled: true。
+    //
+    // 注意：thinking:{type:'disabled'} 只控制本轮是否**产出** reasoning_content，
+    // 不影响历史消息中已存在的 reasoning_content 字段（由 toDeepSeekMessages 保证非空）。
+    const thinkingType = this.cfg.thinkingEnabled ? 'enabled' : 'disabled'
     const body = JSON.stringify({
       model: this.cfg.model,
       messages,
       ...(tools ? { tools } : {}),
       ...(toolChoice ? { tool_choice: toolChoice } : {}),
       stream: true,
+      thinking: { type: thinkingType },
     })
 
     log(
-      `[DeepSeek Adapter] 发起请求：model=${this.cfg.model}，messages=${messages.length}` +
+      `[DeepSeek Adapter] 发起请求：model=${this.cfg.model}，messages=${messages.length}，thinking=${thinkingType}` +
         (placeholderInjected ? '（部分历史 reasoning_content 缺失，已注入占位符兜底）' : ''),
     )
 
@@ -482,6 +512,18 @@ class DeepSeekAdapter implements LlmAdapter {
             sseChunk = JSON.parse(data) as SseChunk
           } catch {
             continue // 忽略非 JSON 行
+          }
+
+          // KV 缓存命中统计（DeepSeek 在最后一个 chunk 中返回 usage）
+          if (sseChunk.usage) {
+            const hit = sseChunk.usage.prompt_cache_hit_tokens ?? 0
+            const miss = sseChunk.usage.prompt_cache_miss_tokens ?? 0
+            const total = hit + miss
+            const hitRate = total > 0 ? Math.round((hit / total) * 100) : 0
+            log(
+              `[DeepSeek Adapter] KV缓存：命中 ${hit} tokens，未命中 ${miss} tokens` +
+                (total > 0 ? `，命中率 ${hitRate}%（输入共 ${total} tokens）` : ''),
+            )
           }
 
           const delta = sseChunk.choices?.[0]?.delta
@@ -880,8 +922,16 @@ const factory: LlmAdapterFactory = {
     const model = typeof cfg.model === 'string' ? cfg.model : 'deepseek-v4-flash'
     const baseUrl = typeof cfg.baseUrl === 'string' ? cfg.baseUrl : 'https://api.deepseek.com'
     const rejectUnauthorized = cfg.rejectUnauthorized !== false // 默认 true
+    const thinkingEnabled = cfg.thinkingEnabled === true // 默认 false（省 token）
     const supportsVision = cfg.supportsVision === true // 默认 false（DeepSeek 主流模型无视觉）
-    return new DeepSeekAdapter({ apiKey, model, baseUrl, rejectUnauthorized, supportsVision })
+    return new DeepSeekAdapter({
+      apiKey,
+      model,
+      baseUrl,
+      rejectUnauthorized,
+      thinkingEnabled,
+      supportsVision,
+    })
   },
 }
 
