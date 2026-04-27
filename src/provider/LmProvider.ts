@@ -1,6 +1,7 @@
 import * as vscode from 'vscode'
 import { log } from '../shared/logger'
 import { getActiveAdapter } from './registry'
+import { estimateMessageTokens } from '../shared/tokenEstimator'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // modux-agent Language Model Provider（薄壳实现）
@@ -60,6 +61,7 @@ export class LmProvider implements vscode.LanguageModelChatProvider {
         messages: messages as unknown as readonly vscode.LanguageModelChatMessage[],
         tools: options.tools ?? [],
         signal: abortController.signal,
+        toolMode: options.toolMode,
       })) {
         progress.report(part)
       }
@@ -74,14 +76,32 @@ export class LmProvider implements vscode.LanguageModelChatProvider {
   }
 
   /**
-   * 估算 token 数，供 VS Code 做请求前预算检查
+   * 估算 token 数，供 VS Code 渲染圆形 token 进度条
+   *
+   * 按输入类型分流：
+   *   - string → 委托给适配器的 countTokens（内部使用字符分类估算）
+   *   - Message → 使用 estimateMessageTokens 按 Part 类型分别估算
+   *
+   * 兜底：getActiveAdapter() 失败时返回 0，保证进度条不崩溃。
    */
   async provideTokenCount(
     _model: vscode.LanguageModelChatInformation,
     text: string | vscode.LanguageModelChatRequestMessage,
     _token: vscode.CancellationToken,
   ): Promise<number> {
-    const str = typeof text === 'string' ? text : JSON.stringify(text)
-    return getActiveAdapter().countTokens(str)
+    // Message 类型：按 Part 分类估算，避免 JSON.stringify 计入结构开销
+    if (typeof text !== 'string') {
+      return estimateMessageTokens(text)
+    }
+
+    // 纯文本：委托给适配器
+    let adapter
+    try {
+      adapter = getActiveAdapter()
+    } catch {
+      return 0
+    }
+
+    return adapter.countTokens(text)
   }
 }

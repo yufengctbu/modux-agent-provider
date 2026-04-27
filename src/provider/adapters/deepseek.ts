@@ -4,6 +4,7 @@ import * as http from 'node:http'
 import { log } from '../../shared/logger'
 import { registerAdapterFactory } from '../registry'
 import type { LlmAdapter, LlmAdapterFactory, LlmChatRequest } from '../types'
+import { estimateTokenCount } from '../../shared/tokenEstimator'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DeepSeek 适配器
@@ -39,9 +40,6 @@ import type { LlmAdapter, LlmAdapterFactory, LlmChatRequest } from '../types'
 //   3. MISSING_REASONING_PLACEHOLDER 兜底（扩展重启或会话跨边界等场景）
 // 始终保证**任何** assistant 的 reasoning_content 字段非空，彻底避开 400 校验。
 // ─────────────────────────────────────────────────────────────────────────────
-
-/** 估算 token 数的字符/token 比例 */
-const CHARS_PER_TOKEN = 4
 
 // ── 思考块（reasoning_content）UI 渲染 ─────────────────────────────────────────
 //
@@ -234,8 +232,18 @@ class DeepSeekAdapter implements LlmAdapter {
    * 缓存生命周期：与 adapter 实例同寿（singleton，跨 chat 调用持续）。
    * 扩展重载、新会话从模型下拉选入等场景下缓存可能为空，由 chat() 中的
    * thinking:disabled 兜底逻辑处理。
+   *
+   * 容量控制：最多保留 50 条记录，超出时淘汰最早**插入**的条目（FIFO）。
+   * 之所以用 FIFO 而非真正 LRU：
+   *   - get/has 命中时不更新位置，实现简单
+   *   - 50 条容量在常见 50 轮以内会话足够，老条目即便被命中，下一轮
+   *     toDeepSeekMessages 也会用 ThinkingPart 优先回填，缓存只是兜底
+   *   - 命中后未被淘汰也不会泄露（覆写时按 fingerprint key 替换）
+   * 单条 reasoning_content 典型值 500-2000 字符，50 条约 100KB，安全。
    */
   private readonly reasoningCache = new Map<string, string>()
+  /** reasoningCache 最大容量（FIFO 上限）*/
+  private static readonly REASONING_CACHE_MAX = 50
 
   constructor(private readonly cfg: DeepSeekConfig) {}
 
@@ -266,10 +274,20 @@ class DeepSeekAdapter implements LlmAdapter {
     // reasoning_content 字段非空，且这一校验**与本轮 thinking 开关无关**。
     // 因此不能用 thinking:{type:'disabled'} 绕过，必须由 toDeepSeekMessages
     // 在转换阶段保证字段恒在（缺失时用 MISSING_REASONING_PLACEHOLDER 兜底）。
+
+    // toolMode → tool_choice 映射
+    //   Required → tool_choice: 'required'（Agent 模式，强制 LLM 调用工具）
+    //   Auto / undefined → 不传（DeepSeek 默认行为等价于 'auto'）
+    const toolChoice =
+      tools && req.toolMode === vscode.LanguageModelChatToolMode.Required
+        ? ('required' as const)
+        : undefined
+
     const body = JSON.stringify({
       model: this.cfg.model,
       messages,
       ...(tools ? { tools } : {}),
+      ...(toolChoice ? { tool_choice: toolChoice } : {}),
       stream: true,
     })
 
@@ -330,6 +348,15 @@ class DeepSeekAdapter implements LlmAdapter {
     const fingerprint =
       sortedCalls.length > 0 ? sortedCalls.map(([, tc]) => tc.id).join(',') : textOut.join('')
     if (fingerprint) {
+      // FIFO 淘汰：超出容量时删除最早**插入**的条目（不是最不常用）
+      // 命中相同 fingerprint 时是覆写，不增加 size
+      if (
+        !this.reasoningCache.has(fingerprint) &&
+        this.reasoningCache.size >= DeepSeekAdapter.REASONING_CACHE_MAX
+      ) {
+        const oldestKey = this.reasoningCache.keys().next().value
+        if (oldestKey !== undefined) this.reasoningCache.delete(oldestKey)
+      }
       this.reasoningCache.set(fingerprint, reasoningOut.content)
       if (reasoningOut.content) {
         log(`[DeepSeek Adapter] 缓存 reasoning_content，长度=${reasoningOut.content.length}`)
@@ -338,7 +365,7 @@ class DeepSeekAdapter implements LlmAdapter {
   }
 
   async countTokens(text: string): Promise<number> {
-    return Math.ceil(text.length / CHARS_PER_TOKEN)
+    return estimateTokenCount(text)
   }
 
   /**
@@ -350,6 +377,12 @@ class DeepSeekAdapter implements LlmAdapter {
     signal: AbortSignal,
   ): Promise<{ incoming: http.IncomingMessage; destroyRequest: () => void }> {
     return new Promise((resolve, reject) => {
+      // 前置检查：避免 abort 后创建 socket 再立即 destroy 的竞态
+      if (signal.aborted) {
+        reject(new DOMException('The operation was aborted', 'AbortError'))
+        return
+      }
+
       const url = new URL(`${this.cfg.baseUrl}/chat/completions`)
       const bodyBuf = Buffer.from(body, 'utf-8')
 

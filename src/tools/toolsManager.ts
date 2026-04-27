@@ -130,6 +130,14 @@ class ToolsManager {
     // 归一化：纯文本结果包裹为 ToolResult
     const normalized: ToolResult = typeof raw === 'string' ? { text: raw } : raw
 
+    // 防御：工具返回了畸形结果（缺少 text 字段），LLM 可以据此感知
+    if (typeof normalized.text !== 'string') {
+      log(`[Tool] ${name} 返回了无效结果（缺少 text 字段）：${typeof normalized.text}`)
+      return {
+        text: `Tool "${name}" returned an invalid result: expected a string "text" field, got ${typeof normalized.text}`,
+      }
+    }
+
     // 统一截断超长 text（对应 Claude Code applyToolResultBudget）
     const limit = tool.maxResultChars ?? DEFAULT_TOOL_RESULT_MAX_CHARS
     if (normalized.text.length > limit) {

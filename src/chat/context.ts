@@ -27,6 +27,9 @@ const SYSTEM_ACK = 'Understood. I will follow these instructions.'
 const COMPACT_ACK =
   'Understood. I have the context from the previous session and will continue from where we left off.'
 
+/** LLM 摘要压缩超时（30 秒），超时后自动 abort 降级为截断 */
+const COMPACT_TIMEOUT_MS = 30_000
+
 /**
  * 微压缩占位文本：替换掉旧的、冗长的 ToolResultPart 文本主体
  *
@@ -432,6 +435,8 @@ async function compactHistoryWithLLM(
   ]
 
   const abortController = new AbortController()
+  // 超时保护：压缩是辅助优化，不应阻塞 Agent 初始化
+  const timeoutId = setTimeout(() => abortController.abort(), COMPACT_TIMEOUT_MS)
 
   let summary = ''
   try {
@@ -447,6 +452,8 @@ async function compactHistoryWithLLM(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     throw new Error(`LLM 摘要调用失败：${msg}`)
+  } finally {
+    clearTimeout(timeoutId)
   }
 
   if (!summary.trim()) throw new Error('LLM 返回空摘要')

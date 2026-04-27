@@ -2,6 +2,7 @@ import * as vscode from 'vscode'
 import { log } from '../../shared/logger'
 import { registerAdapterFactory } from '../registry'
 import type { LlmAdapter, LlmAdapterFactory, LlmChatRequest } from '../types'
+import { estimateTokenCount } from '../../shared/tokenEstimator'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Modux Backend 适配器
@@ -18,9 +19,6 @@ import type { LlmAdapter, LlmAdapterFactory, LlmChatRequest } from '../types'
 // 当其作为激活 Adapter 且被 Agent Loop 使用时，Loop 会在首轮因无
 // ToolCallPart 而自然结束。
 // ─────────────────────────────────────────────────────────────────────────────
-
-/** 估算 token 数的字符/token 比例 */
-const CHARS_PER_TOKEN = 4
 
 /** 自有后端配置（来自 config.llms 中 type=moduxBackend 的条目） */
 interface ModuxBackendConfig {
@@ -55,6 +53,8 @@ interface BackendMessage {
 interface BackendRequestBody {
   messages: BackendMessage[]
   tools?: vscode.LanguageModelChatTool[]
+  /** tool_choice 映射自 req.toolMode，仅当 tools 存在且有 toolMode 时设置 */
+  tool_choice?: 'required' | 'auto'
 }
 
 /** OpenAI SSE delta（兼容两种格式） */
@@ -92,7 +92,7 @@ class ModuxBackendAdapter implements LlmAdapter {
   }
 
   async countTokens(text: string): Promise<number> {
-    return Math.ceil(text.length / CHARS_PER_TOKEN)
+    return estimateTokenCount(text)
   }
 
   // ── 核心：向后端 POST，按响应类型分流 ───────────────────────────────────────
@@ -113,6 +113,10 @@ class ModuxBackendAdapter implements LlmAdapter {
 
     if (this.cfg.forwardTools && req.tools.length > 0) {
       body.tools = [...req.tools]
+      // toolMode → tool_choice 映射（对齐 DeepSeek/Copilot 的行为）
+      if (req.toolMode === vscode.LanguageModelChatToolMode.Required) {
+        body.tool_choice = 'required'
+      }
     }
 
     log(`[Backend Adapter] 转发至：${this.cfg.url}`)

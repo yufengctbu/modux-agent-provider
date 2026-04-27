@@ -6,6 +6,7 @@ import { getActiveAdapter } from '../provider/registry'
 import type { LlmAdapter } from '../provider/types'
 import type { WorkspaceContext } from './workspace'
 import { log } from '../shared/logger'
+import { estimateToolDefinitions } from '../shared/tokenEstimator'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Agent 核心循环
@@ -104,7 +105,16 @@ export async function runAgentLoop(
   }
 
   const contextBuilder = new ContextBuilder(wsCtx, history)
-  const maxRounds = config.agent.maxLoopRounds
+  // 防御：maxLoopRounds 可能是 NaN/undefined/负数，归一为 [1, 50] 之间的整数
+  const rawMaxRounds = Number(config.agent.maxLoopRounds)
+  const maxRounds =
+    Number.isFinite(rawMaxRounds) && rawMaxRounds > 0 ? Math.min(50, Math.floor(rawMaxRounds)) : 5
+
+  // 工具列表与定义 token 在整个 loop 内通常不变，提到循环外算一次即可，
+  // 避免每轮重复 JSON.stringify(schema) 的开销。
+  const tools = toolsManager.getAvailableTools()
+  const toolDefTokens = estimateToolDefinitions(tools)
+  log(`[Loop] 工具定义 token 估算 ≈ ${toolDefTokens}（共 ${tools.length} 个工具）`)
 
   for (let round = 1; round <= maxRounds; round++) {
     if (token.isCancellationRequested) {
@@ -129,10 +139,12 @@ export async function runAgentLoop(
     const abortController = new AbortController()
     const cancelDisposable = token.onCancellationRequested(() => abortController.abort())
 
+    log(`[Loop] 第 ${round} 轮：消息数=${messages.length}`)
+
     try {
       for await (const part of adapter.chat({
         messages,
-        tools: toolsManager.getAvailableTools(),
+        tools,
         signal: abortController.signal,
       })) {
         if (part instanceof vscode.LanguageModelTextPart) {

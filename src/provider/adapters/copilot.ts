@@ -2,6 +2,7 @@ import * as vscode from 'vscode'
 import { log } from '../../shared/logger'
 import { registerAdapterFactory } from '../registry'
 import type { LlmAdapter, LlmAdapterFactory, LlmChatRequest } from '../types'
+import { estimateTokenCount } from '../../shared/tokenEstimator'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Copilot 适配器
@@ -14,9 +15,6 @@ import type { LlmAdapter, LlmAdapterFactory, LlmChatRequest } from '../types'
 // CancellationTokenSource —— 当 signal 触发 abort 时调 ts.cancel()。
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** 估算 token 数的字符/token 比例（4 字符 ≈ 1 token，粗略公式） */
-const CHARS_PER_TOKEN = 4
-
 /** Copilot 适配器配置结构（来自 config.llms 中 type=copilot 的条目） */
 interface CopilotConfig {
   readonly vendor: string
@@ -26,6 +24,12 @@ interface CopilotConfig {
 class CopilotAdapter implements LlmAdapter {
   readonly type = 'copilot'
   private readonly selector: vscode.LanguageModelChatSelector
+  private cachedModel: vscode.LanguageModelChat | undefined = undefined
+  /** 模型缓存时间戳（epoch ms），用于 TTL 失效 */
+  private cachedModelTs = 0
+
+  /** 模型缓存 TTL（5 分钟），过期后重新 selectChatModels */
+  private static readonly MODEL_CACHE_TTL_MS = 5 * 60 * 1000
 
   constructor(cfg: CopilotConfig) {
     this.selector = { vendor: cfg.vendor, family: cfg.family }
@@ -65,7 +69,10 @@ class CopilotAdapter implements LlmAdapter {
     try {
       const response = await model.sendRequest(
         [...req.messages],
-        { tools: [...req.tools] },
+        {
+          tools: [...req.tools],
+          toolMode: req.toolMode,
+        },
         tokenSource.token,
       )
       // VS Code 将 stream 元素类型声明为 unknown 以兼容未来新增 Part 类型，
@@ -74,6 +81,16 @@ class CopilotAdapter implements LlmAdapter {
         if (req.signal.aborted) return
         yield part as vscode.LanguageModelResponsePart
       }
+    } catch (err) {
+      // sendRequest / stream 失败时主动失效缓存，下一次请求重新选模型。
+      // 触发场景：Copilot token 失效、用户切换账号、模型 family 被服务端下线等。
+      // 取消（CancellationError）不算缓存失效原因，跳过清理。
+      if (!req.signal.aborted) {
+        log(`[Copilot Adapter] sendRequest 失败，失效模型缓存：${err instanceof Error ? err.message : String(err)}`)
+        this.cachedModel = undefined
+        this.cachedModelTs = 0
+      }
+      throw err
     } finally {
       req.signal.removeEventListener('abort', onAbort)
       tokenSource.dispose()
@@ -81,19 +98,30 @@ class CopilotAdapter implements LlmAdapter {
   }
 
   async countTokens(text: string): Promise<number> {
-    return Math.ceil(text.length / CHARS_PER_TOKEN)
+    return estimateTokenCount(text)
   }
 
   /**
-   * 选择底层 Copilot 模型（首次匹配项）
+   * 选择底层 Copilot 模型（带缓存）
    * 找不到时返回 undefined，由 chat() 统一抛错
    */
   private async selectModel(): Promise<vscode.LanguageModelChat | undefined> {
+    // 缓存命中且未过期
+    if (
+      this.cachedModel !== undefined &&
+      Date.now() - this.cachedModelTs < CopilotAdapter.MODEL_CACHE_TTL_MS
+    ) {
+      return this.cachedModel
+    }
+    this.cachedModel = undefined // 过期清除，让后续逻辑重新选择
+
     const models = await vscode.lm.selectChatModels(this.selector)
     if (models.length === 0) {
       log(`[Copilot Adapter] 警告：未找到匹配的模型 selector=${JSON.stringify(this.selector)}`)
       return undefined
     }
+    this.cachedModel = models[0]
+    this.cachedModelTs = Date.now()
     log(`[Copilot Adapter] 使用模型：${models[0].name}`)
     return models[0]
   }

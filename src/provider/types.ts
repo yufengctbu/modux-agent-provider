@@ -22,6 +22,8 @@ export interface LlmChatRequest {
   readonly messages: readonly vscode.LanguageModelChatMessage[]
   readonly tools: readonly vscode.LanguageModelChatTool[]
   readonly signal: AbortSignal
+  /** toolMode — VS Code Chat 模式，映射到 LLM 的 tool_choice 参数 */
+  readonly toolMode?: vscode.LanguageModelChatToolMode
 }
 
 /**

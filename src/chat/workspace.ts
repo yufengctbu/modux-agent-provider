@@ -53,10 +53,22 @@ export interface WorkspaceContext {
   today: string
 }
 
+/** 工作区上下文缓存 TTL（2 分钟），过期后自动重新采集 */
+const WORKSPACE_CONTEXT_TTL_MS = 2 * 60 * 1000
+
 // ── 模块级缓存 ────────────────────────────────────────────────────────────────
 
 /** 对同一个工作区只采集一次（per-extension-activation），对应 Claude Code memoize() */
 let cachedWorkspaceContext: WorkspaceContext | null = null
+/** 缓存时间戳（epoch ms），用于 TTL 失效 */
+let cachedWorkspaceContextTs = 0
+/**
+ * In-flight 请求去重：同一时刻只允许一次 git 命令并发采集。
+ *
+ * 不加这个的话，冷启动 / TTL 过期瞬间多个并发调用都会越过缓存检查、
+ * 各自 spawn 4 个 git 子进程（4 × N 个无谓 fork），写缓存时互相覆盖。
+ */
+let inFlightContext: Promise<WorkspaceContext> | null = null
 
 // ── 公开 API ──────────────────────────────────────────────────────────────────
 
@@ -65,10 +77,26 @@ let cachedWorkspaceContext: WorkspaceContext | null = null
  *
  * 并发执行 4 个 git 命令（Promise.all），总耗时约等于最慢的一个命令。
  * git 命令失败时静默降级（返回空字符串），不影响主流程。
+ *
+ * 并发安全：通过 inFlightContext 共享 Promise，避免多调用方重复采集。
  */
 export async function getWorkspaceContext(): Promise<WorkspaceContext> {
-  if (cachedWorkspaceContext) return cachedWorkspaceContext
+  // 缓存命中且未过期
+  if (cachedWorkspaceContext && Date.now() - cachedWorkspaceContextTs < WORKSPACE_CONTEXT_TTL_MS) {
+    return cachedWorkspaceContext
+  }
 
+  // 已有 in-flight 采集任务 → 复用同一个 Promise
+  if (inFlightContext) return inFlightContext
+
+  inFlightContext = collectWorkspaceContext().finally(() => {
+    inFlightContext = null
+  })
+  return inFlightContext
+}
+
+/** 实际的采集逻辑（私有，避免被并发调用方重复执行）*/
+async function collectWorkspaceContext(): Promise<WorkspaceContext> {
   const folders = vscode.workspace.workspaceFolders
   const projectRoot = folders?.[0]?.uri.fsPath ?? process.cwd()
 
@@ -92,6 +120,7 @@ export async function getWorkspaceContext(): Promise<WorkspaceContext> {
     gitRecentCommits: gitRecentCommits || '(no commits)',
     today: new Date().toISOString().slice(0, 10),
   }
+  cachedWorkspaceContextTs = Date.now()
 
   log(`[Workspace] 上下文已采集：分支=${cachedWorkspaceContext.gitBranch}`)
   return cachedWorkspaceContext
