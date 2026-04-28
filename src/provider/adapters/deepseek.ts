@@ -251,6 +251,11 @@ class DeepSeekAdapter implements LlmAdapter {
   readonly type = 'deepseek'
   /** DeepSeek 模型上下文窗口（128k token），供压缩模块做 token 预算判断 */
   readonly contextWindowSize = 128_000
+  /**
+   * UI 进度条固定补偿：system/workspace 前缀 + 工具定义约占 30K token，
+   * VS Code 无法感知这部分开销，通过此字段补偿进度条分子和分母。
+   */
+  readonly uiFixedOverheadTokens = 30_000
 
   /**
    * reasoning_content 缓存：key = assistant 消息指纹
@@ -276,6 +281,10 @@ class DeepSeekAdapter implements LlmAdapter {
   constructor(private readonly cfg: DeepSeekConfig) {}
 
   async getChatInformation(): Promise<vscode.LanguageModelChatInformation[]> {
+    const effectiveMaxInputTokens = Math.max(
+      16_384,
+      this.contextWindowSize - this.uiFixedOverheadTokens,
+    )
     return [
       {
         id: 'modux-agent-deepseek',
@@ -283,7 +292,7 @@ class DeepSeekAdapter implements LlmAdapter {
         family: 'modux-agent-deepseek',
         version: '1.0.0',
         tooltip: 'Modux Agent DeepSeek — 由 DeepSeek 驱动的智能编码助手',
-        maxInputTokens: 128_000,
+        maxInputTokens: effectiveMaxInputTokens,
         maxOutputTokens: 16_384,
         capabilities: { toolCalling: true },
       },

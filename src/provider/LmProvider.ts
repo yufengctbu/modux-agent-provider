@@ -193,7 +193,17 @@ export class LmProvider implements vscode.LanguageModelChatProvider {
 
     // Message 类型：按当前适配器类型分发到 tokenManager
     if (typeof text !== 'string') {
-      return tokenManager.countMessage(adapter.type, text)
+      let tokens = tokenManager.countMessage(adapter.type, text)
+
+      // UI 进度条补偿：VS Code 无法感知我们注入的固定前缀+工具定义开销。
+      // messages[0] 在运行时是 Copilot 注入的 system 消息（role=3），
+      // 将补偿值展到该条上，使进度条分子更接近实际发给后端的 token 总量。
+      const overhead = adapter.uiFixedOverheadTokens ?? 0
+      if (overhead > 0 && (text.role as unknown as number) === 3) {
+        tokens += overhead
+      }
+
+      return tokens
     }
 
     return adapter.countTokens(text)

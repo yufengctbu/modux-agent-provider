@@ -69,10 +69,19 @@ class ModuxBackendAdapter implements LlmAdapter {
   readonly type = 'moduxBackend'
   /** 自有后端保守估算的上下文窗口，实际值由后端模型决定 */
   readonly contextWindowSize = 16_000
+  /**
+   * UI 进度条固定补偿：system 前缀 + 工具定义等隐形开销。
+   * VS Code 无法感知这部分，通过此字段补偿 UI 进度条分子和分母。
+   */
+  readonly uiFixedOverheadTokens = 4_000
 
   constructor(private readonly cfg: ModuxBackendConfig) {}
 
   async getChatInformation(): Promise<vscode.LanguageModelChatInformation[]> {
+    const effectiveMaxInputTokens = Math.max(
+      4_000,
+      this.contextWindowSize - this.uiFixedOverheadTokens,
+    )
     return [
       {
         id: 'modux-agent',
@@ -80,7 +89,7 @@ class ModuxBackendAdapter implements LlmAdapter {
         family: 'modux-agent',
         version: '1.0.0',
         tooltip: 'Modux Agent — 你的智能编码助手',
-        maxInputTokens: 128_000,
+        maxInputTokens: effectiveMaxInputTokens,
         maxOutputTokens: 16_384,
         capabilities: { toolCalling: true },
       },

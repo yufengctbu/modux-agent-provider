@@ -47,6 +47,16 @@ export interface LlmAdapter {
   readonly contextWindowSize?: number
 
   /**
+   * UI 进度条固定补偿（token 数）。
+   *
+   * VS Code 只统计其可见消息，不知道我们注入的 system/workspace 前缀和工具定义。
+   * 此值会在 provideTokenCount 中补加到 Copilot system 消息的计数里，
+   * 使进度条分子贴近实际发给后端的 token 总量。
+   * getChatInformation() 的 maxInputTokens 也应相应扣除此值。
+   */
+  readonly uiFixedOverheadTokens?: number
+
+  /**
    * 向 VS Code 模型选择器暴露的元数据
    * 目前统一呈现单一 "modux-agent" 入口，底层由激活的 Adapter 提供服务
    */
