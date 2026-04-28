@@ -4,7 +4,7 @@ import * as http from 'node:http'
 import { log } from '../../shared/logger'
 import { registerAdapterFactory } from '../registry'
 import type { LlmAdapter, LlmAdapterFactory, LlmChatRequest } from '../types'
-import { estimateTokenCount } from '../../shared/tokenEstimator'
+import { countTokensByType } from '../../token'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DeepSeek 适配器
@@ -417,7 +417,7 @@ class DeepSeekAdapter implements LlmAdapter {
   }
 
   async countTokens(text: string): Promise<number> {
-    return estimateTokenCount(text)
+    return countTokensByType(this.type, text)
   }
 
   /**

@@ -1,8 +1,6 @@
 import * as vscode from 'vscode'
 import { registerAgent } from './provider/index'
 import { registerLogger, log } from './shared/logger'
-import { initPermissions } from './tools/permissions'
-import './tools' // 触发工具注册副作用（将所有工具注册到 toolsManager）
 import './provider/adapters' // 触发 LLM 适配器注册副作用（将所有 adapter 注册到 registry）
 
 /**
@@ -11,7 +9,6 @@ import './provider/adapters' // 触发 LLM 适配器注册副作用（将所有 
  */
 export function activate(context: vscode.ExtensionContext): void {
   registerLogger(context) // 注册日志
-  initPermissions(context) // 初始化运行时权限管理
   log('modux-agent 已激活')
 
   registerAgent(context) // 注册 Agent

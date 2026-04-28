@@ -2,7 +2,7 @@ import * as vscode from 'vscode'
 import { log } from '../../shared/logger'
 import { registerAdapterFactory } from '../registry'
 import type { LlmAdapter, LlmAdapterFactory, LlmChatRequest } from '../types'
-import { estimateTokenCount } from '../../shared/tokenEstimator'
+import { countTokensByType } from '../../token'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Modux Backend 适配器
@@ -94,7 +94,7 @@ class ModuxBackendAdapter implements LlmAdapter {
   }
 
   async countTokens(text: string): Promise<number> {
-    return estimateTokenCount(text)
+    return countTokensByType(this.type, text)
   }
 
   // ── 核心：向后端 POST，按响应类型分流 ───────────────────────────────────────

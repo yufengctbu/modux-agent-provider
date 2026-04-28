@@ -94,4 +94,6 @@ export interface ReactiveCompactOptions {
   readonly maxHistoryTurns: number
   /** 是否启用响应式重试（false 时直接 throw 原始错误） */
   readonly enabled: boolean
+  /** 当前激活的 LLM 类型，用于 token 估算分发 */
+  readonly llmType?: string
 }

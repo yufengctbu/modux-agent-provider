@@ -31,6 +31,8 @@ export interface MicroCompactOptions {
   readonly keepRecent: number
   /** 单条 ToolResult 文本总长低于此值时不压缩（默认 400） */
   readonly minChars: number
+  /** 结构化 payload（如 XML/日志块）的更低触发阈值（默认 220） */
+  readonly structuredMinChars: number
 }
 
 export interface MicroCompactResult {
@@ -39,6 +41,59 @@ export interface MicroCompactResult {
   readonly replacedCount: number
   /** 约节省的字符数 */
   readonly savedChars: number
+  /** 按结构化特征触发替换的数量 */
+  readonly structuredReplacedCount: number
+}
+
+const STRUCTURED_MARKERS = [
+  '<environment_info>',
+  '<workspace_info>',
+  '<editorContext>',
+  '<reminderInstructions>',
+  '<context>',
+  'role:',
+  'mimeType:',
+  '_content:',
+  '[DEBUG]',
+]
+
+/**
+ * test.md 显示大量工具结果是结构化日志/XML 块；这类内容可更激进微压缩。
+ */
+function looksLikeStructuredPayload(text: string): boolean {
+  if (!text) return false
+
+  let markerHits = 0
+  const lower = text.toLowerCase()
+  for (const marker of STRUCTURED_MARKERS) {
+    if (lower.includes(marker.toLowerCase())) markerHits++
+  }
+
+  if (markerHits >= 2) return true
+
+  const lines = text.split('\n')
+  if (lines.length < 8) return false
+
+  let structuredLines = 0
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    if (trimmed.startsWith('<') || trimmed.includes(':') || trimmed.startsWith('{')) {
+      structuredLines++
+    }
+  }
+  return structuredLines / lines.length >= 0.55
+}
+
+function flattenToolResultText(part: vscode.LanguageModelToolResultPart): string {
+  let text = ''
+  for (const inner of part.content) {
+    if (inner instanceof vscode.LanguageModelTextPart) {
+      if (text.length > 0) text += '\n'
+      text += inner.value
+    }
+  }
+  return text
 }
 
 /**
@@ -60,11 +115,17 @@ export function applyMicrocompaction(
   enabled = true,
 ): MicroCompactResult {
   if (!enabled) {
-    return { messages: [...messages], replacedCount: 0, savedChars: 0 }
+    return {
+      messages: [...messages],
+      replacedCount: 0,
+      savedChars: 0,
+      structuredReplacedCount: 0,
+    }
   }
 
   const keepRecent = Math.max(0, opts.keepRecent)
   const minChars = Math.max(0, opts.minChars)
+  const structuredMinChars = Math.max(0, opts.structuredMinChars)
 
   // ── 第一遍：收集最近 keepRecent 个 ToolResultPart 的 callId ───────────────
   const recentCallIds = new Set<string>()
@@ -81,6 +142,7 @@ export function applyMicrocompaction(
   // ── 第二遍：替换不在保留集合中的旧 ToolResultPart ────────────────────────
   let replacedCount = 0
   let savedChars = 0
+  let structuredReplacedCount = 0
 
   const resultMessages = messages.map((msg) => {
     const content = msg.content as vscode.LanguageModelInputPart[]
@@ -91,10 +153,14 @@ export function applyMicrocompaction(
       if (recentCallIds.has(part.callId)) return part
 
       const textLen = sumToolResultTextLength(part)
-      if (textLen < minChars) return part
+      const flatText = flattenToolResultText(part)
+      const isStructured = looksLikeStructuredPayload(flatText)
+      const threshold = isStructured ? structuredMinChars : minChars
+      if (textLen < threshold) return part
 
       mutated = true
       replacedCount++
+      if (isStructured) structuredReplacedCount++
       savedChars += textLen - MICRO_COMPACT_STUB.length
       return new vscode.LanguageModelToolResultPart(part.callId, [
         new vscode.LanguageModelTextPart(MICRO_COMPACT_STUB),
@@ -104,5 +170,5 @@ export function applyMicrocompaction(
     return mutated ? cloneMessageWithContent(msg, newContent) : msg
   })
 
-  return { messages: resultMessages, replacedCount, savedChars }
+  return { messages: resultMessages, replacedCount, savedChars, structuredReplacedCount }
 }

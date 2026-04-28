@@ -6,9 +6,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const config = {
-  // ── LLM 适配器列表 ─────────────────────────────────────────────────────────
-  // 按顺序查找，采用第一个 enabled: true 的条目。
-  // type 必须与 provider/adapters/ 下已注册的工厂匹配。
   llms: [
     // ModuxBackend：转发至用户自有的 OpenAI-compatible HTTP 服务
     {
@@ -28,23 +25,6 @@ export const config = {
     },
   ],
 
-  // ── 工具开关 ───────────────────────────────────────────────────────────────
-  // 设为 false 可禁用某个工具（LLM 将看不到该工具的描述，无法调用）
-  tools: {
-    readFile: { enabled: true },
-    listDir: { enabled: true },
-    findFiles: { enabled: true },
-    searchCode: { enabled: true },
-    editFile: { enabled: true },
-    writeFile: { enabled: true }, // 全量写文件（谨慎开启，会覆盖原文件）
-    webFetch: { enabled: true },
-    webSearch: { enabled: true },
-    lspInfo: { enabled: true },
-    todoWrite: { enabled: true },
-    askUser: { enabled: true },
-    runCommand: { enabled: true, timeoutMs: 10_000 }, // 执行 shell 命令（谨慎开启）
-  },
-
   // ── Agent 行为配置 ─────────────────────────────────────────────────────────
   agent: {
     // 追加到默认 System Prompt 之后的自定义指令（空字符串则不追加）
@@ -53,35 +33,11 @@ export const config = {
     // 响应语言，如 "Chinese (Simplified)"、"Japanese"；留空时 AI 自行判断
     language: '',
 
-    // Agent Loop 单次任务最大循环轮次（防止无限循环）
-    maxLoopRounds: 10,
-
-    // 触发 LLM 历史摘要压缩的消息轮数阈值（初始化时，超过此值才压缩）
-    compactThreshold: 10,
-
-    // 摘要失败时的兜底硬截断轮数（建议 >= compactThreshold）
+    // 摘要失败时的兜底硬截断轮数
     maxHistoryTurns: 20,
 
     // 是否启用 LLM 摘要压缩（false 时直接截断至 maxHistoryTurns）
     compactHistoryEnabled: true,
-
-    // read_file 命中相同文件 + 范围 + mtime 时返回缓存 stub（减少重复读）
-    fileReadDedupEnabled: true,
-
-    // 单张图像最大字节数，超出则拒绝读取（默认 5 MB）
-    maxImageBytes: 5 * 1024 * 1024,
-
-    // 微压缩：是否对历史中"足够老 + 足够大"的工具结果做占位替换
-    microcompactEnabled: true,
-
-    // 微压缩：最近多少条 ToolResult 永远不压缩（保留 LLM 的近期工作记忆）
-    microcompactKeepRecentToolResults: 6,
-
-    // 微压缩：单条 ToolResult 字符数低于此值时不压缩（收益不足时跳过）
-    microcompactMinToolResultChars: 400,
-
-    // 做 LLM 摘要压缩前是否剥离图像 DataPart（文字摘要模型不需要图像）
-    stripImagesInCompact: true,
   },
 
   // ── 上下文压缩专用配置 ─────────────────────────────────────────────────────
@@ -105,6 +61,19 @@ export const config = {
     // 注：修复 reasoning_content token 估算后，第一次 LLM 压缩尝试成功率大幅提升，
     //     无需保留 3 次重试。降为 1 可将每次 compact 触发的最大 API 调用数从 4 降到 2。
     maxPtlRetries: 1,
+
+    // ── Layer 1：微压缩（每轮都执行，首轮一般 no-op）──────────────────────
+    // 是否启用微压缩
+    microEnabled: true,
+
+    // 最近多少条 ToolResult 不压缩，保留当前推理工作记忆
+    microKeepRecentToolResults: 6,
+
+    // 普通文本 ToolResult 的最小压缩阈值
+    microMinToolResultChars: 400,
+
+    // 结构化 payload（如 test.md 中 XML/日志样式）的更低触发阈值
+    microStructuredMinChars: 220,
 
     // ── Layer 3：Token 感知自动压缩 ──────────────────────────────────────────
     // 是否在每轮 LLM 调用前检测 token 预算

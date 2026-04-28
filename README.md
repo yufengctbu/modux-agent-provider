@@ -1,16 +1,18 @@
 # modux-agent-provider
 
-一个基于 **GitHub Copilot Chat Participant API** 的 VS Code 扩展，将 `@modux-agent` 注册为 Copilot Chat 中的自定义 Agent。
+一个基于 **VS Code Language Model Provider API** 的扩展，将自定义 LLM（DeepSeek 或自有后端）注册为 Copilot Chat 的可选模型，出现在模型下拉列表中。
 
 ---
 
 ## 效果预览
 
-在 VS Code 的 Copilot Chat 面板中，输入 `@modux-agent` 即可与该 Agent 交互：
+在 VS Code 的 Copilot Chat 面板中，点击模型下拉框，选择 `modux-agent-deepseek`（或你配置的任意名称）即可使用：
 
 ```
-> @modux-agent 帮我解释这段代码的作用
+Copilot Chat 模型下拉 → modux-agent-deepseek
 ```
+
+选中后，所有 Copilot Chat 请求（含工具调用、多轮对话）均通过本扩展转发至配置的 LLM 后端。
 
 ---
 
@@ -29,12 +31,38 @@
 ### 1. 安装依赖
 
 ```bash
-npm install
+pnpm install
 ```
 
-### 2. 本地开发调试（推荐）
+### 2. 配置 LLM
 
-#### 2.1 一键启动
+编辑 `src/config/config.ts`，在 `llms` 数组中启用所需后端：
+
+```typescript
+// 直连 DeepSeek API
+{
+  type: 'deepseek',
+  enabled: true,
+  apiKey: 'sk-xxxxxxxxxxxxxxxx',
+  model: 'deepseek-v3',
+  baseUrl: 'https://api.deepseek.com',
+  thinkingMode: false,
+},
+
+// 或转发至自有 OpenAI-compatible HTTP 服务
+{
+  type: 'moduxBackend',
+  enabled: true,
+  url: 'http://localhost:3000/v1/chat',
+  forwardTools: true,
+},
+```
+
+只有第一个 `enabled: true` 的条目会生效。
+
+### 3. 本地开发调试（推荐）
+
+#### 3.1 一键启动
 
 在 VS Code 中按 **F5**（或菜单 `运行 → 启动调试`），VS Code 会自动：
 
@@ -42,77 +70,71 @@ npm install
 2. 等待 Vite 完成首次构建（检测到 `✓ built in` 输出）
 3. 打开一个新的 **扩展开发宿主（Extension Development Host）** 窗口
 
-> **注意**：宿主窗口是独立的 VS Code 实例，已加载本扩展。必须在**宿主窗口**中使用 Copilot Chat 与 `@modux-agent` 交互，不是原始窗口。
+> **注意**：宿主窗口是独立的 VS Code 实例，已加载本扩展。必须在**宿主窗口**中使用 Copilot Chat，不是原始窗口。
 
-#### 2.2 与 Agent 交互
+#### 3.2 选择模型并交互
 
 在宿主窗口中：
 
 1. 打开 Copilot Chat 面板（侧边栏图标 或 `⌃⌘I` / `Ctrl+Alt+I`）
-2. 在输入框输入 `@` 可看到 `modux-agent` 出现在候选列表中
-3. 选中后发送消息，响应会流式显示在 Chat 面板
+2. 点击输入框旁的**模型下拉框**
+3. 选择 `modux-agent-deepseek`（或你配置的模型名）
+4. 正常发送消息，响应会流式显示在 Chat 面板
 
-```
-@modux-agent 帮我解释这段代码
-```
+#### 3.3 查看运行日志
 
-#### 2.3 查看运行日志
-
-扩展的所有运行日志输出在 **Output Channel**：
-
-- 在原始窗口（或宿主窗口）菜单：`查看 → 输出`
-- 在右上角下拉列表中选择 `modux-agent`
+- 菜单：`查看 → 输出`
+- 右上角下拉列表中选择 `modux-agent`
 
 你会看到类似如下输出：
 
 ```
 [10:23:01] modux-agent 已激活
-[10:23:01] Chat Participant 已注册：modux-agent.modux-agent
-[10:23:15] 收到消息：帮我解释这段代码
-[10:23:15] 使用模型：gpt-4o
+[10:23:01] LM Provider 已注册：vendor=modux
+[10:23:15] [LM Provider] 请求：model=modux-agent-deepseek，原始消息=3，重建后=6，工具=62，adapter=deepseek
+[10:23:15] [Compact] token ≈ 26,400 / 32,000
 [10:23:16] 响应完成
 ```
 
-#### 2.4 断点调试（源码级）
+#### 3.4 断点调试（源码级）
 
 由于构建时开启了 Source Map，可以直接在 TypeScript 源文件中打断点：
 
-1. 在 `src/agent/handler.ts` 等文件中点击行号左侧设置断点（红点）
+1. 在 `src/provider/LmProvider.ts` 等文件中点击行号左侧设置断点（红点）
 2. 按 **F5** 启动调试
 3. 在宿主窗口发送消息，程序会在断点处暂停
-4. 在原始窗口的调试工具栏可查看调用栈、变量值等
 
-#### 2.5 修改代码后热重载
+#### 3.5 修改代码后热重载
 
 Vite watch 模式会自动检测文件变化并重新构建。构建完成后：
 
 - 在宿主窗口按 `⌘R`（macOS）/ `Ctrl+R` 重新加载窗口，新代码即时生效
 - **无需重新按 F5**，重载窗口即可
 
-#### 2.6 停止调试
+#### 3.6 停止调试
 
 - 在原始窗口点击调试工具栏的 **停止** 按钮（红色方块）
 - 或按 `⇧F5`（macOS: `Shift+F5`）
 
 ---
 
-### 3. 生产构建
+### 4. 生产构建
 
 ```bash
-npm run build
+pnpm run build
 ```
 
 产物输出至 `dist/extension.cjs`。
 
-### 4. 打包为 `.vsix`
+### 5. 打包为 `.vsix`
 
 ```bash
-npm run package
+pnpm run package
 ```
 
 生成 `modux-agent-provider-0.0.1.vsix`。
 
-### 5. 安装到 VS Code
+### 6. 安装到 VS Code
 
 ```bash
 code --install-extension modux-agent-provider-0.0.1.vsix
@@ -122,29 +144,92 @@ code --install-extension modux-agent-provider-0.0.1.vsix
 
 ---
 
+## 配置说明
+
+所有配置集中在 `src/config/config.ts`，修改后重新构建即可生效。
+
+### `llms[]` — LLM 适配器列表
+
+按顺序查找，采用第一个 `enabled: true` 的条目。
+
+| 字段           | 类型    | 说明                                     |
+| -------------- | ------- | ---------------------------------------- |
+| `type`         | string  | 适配器类型：`deepseek` \| `moduxBackend` |
+| `enabled`      | boolean | 是否激活此后端                           |
+| `apiKey`       | string  | DeepSeek API Key（仅 deepseek 类型需要） |
+| `model`        | string  | 模型名称，显示在 Copilot Chat 下拉框     |
+| `baseUrl`      | string  | API 基础地址                             |
+| `thinkingMode` | boolean | 启用 CoT 思考模式（消耗更多 token）      |
+| `url`          | string  | 自有后端地址（仅 moduxBackend 类型需要） |
+| `forwardTools` | boolean | 是否把工具定义转发给自有后端             |
+
+### `agent` — 行为配置
+
+| 字段                    | 默认值 | 说明                                                  |
+| ----------------------- | ------ | ----------------------------------------------------- |
+| `systemPrompt`          | `''`   | 追加到默认 System Prompt 之后的自定义指令             |
+| `language`              | `''`   | 强制响应语言（如 `"Chinese (Simplified)"`），留空自动 |
+| `maxHistoryTurns`       | `20`   | 摘要失败时的兜底硬截断轮数                            |
+| `compactHistoryEnabled` | `true` | 是否启用 LLM 摘要压缩（false 时直接截断）             |
+
+### `compact` — 上下文压缩参数
+
+| 字段                 | 默认值  | 说明                                                     |
+| -------------------- | ------- | -------------------------------------------------------- |
+| `llm`                | —       | 压缩专用 LLM（建议用较小模型节省费用，不配置则用主 LLM） |
+| `timeoutMs`          | `30000` | 摘要调用超时（ms），超时后降级为截断                     |
+| `maxPtlRetries`      | `1`     | 渐进截断重试最大次数                                     |
+| `autoEnabled`        | `true`  | 是否在每轮调用前检测 token 预算                          |
+| `autoThresholdRatio` | `0.75`  | 触发 LLM 摘要的 token 比例（上下文窗口的 75%）           |
+| `autoHardLimitRatio` | `0.92`  | 强制先截断再摘要的 token 比例（92%，防 OOM）             |
+| `autoMaxFailures`    | `3`     | 连续摘要失败次数达此值后，本轮只截断不调 LLM（熔断）     |
+| `reactiveEnabled`    | `true`  | 是否在 LLM 返回 context_too_long 时自动压缩并重试        |
+| `reactiveMaxRetries` | `2`     | 响应式重试最大次数                                       |
+
+---
+
 ## 项目结构
 
 ```
 modux-agent-provider/
 ├── src/
-│   ├── extension.ts                  # 扩展激活/注销入口，协调初始化
+│   ├── extension.ts                  # 扩展激活/注销入口
 │   │
 │   ├── provider/
-│   │   └── index.ts                  # 【Provider 层】向 Copilot 注册 Chat Participant
+│   │   ├── index.ts                  # 注册 LM Provider（vscode.lm.registerLanguageModelChatProvider）
+│   │   ├── LmProvider.ts             # 核心：消息重建 + 压缩 + 转发
+│   │   ├── registry.ts               # Adapter 注册中心（主 Adapter + 压缩专用 Adapter）
+│   │   ├── types.ts                  # LlmAdapter 接口定义
+│   │   └── adapters/
+│   │       ├── index.ts              # Adapter 工厂注册表
+│   │       ├── deepseek.ts           # DeepSeek API 适配器
+│   │       └── moduxBackend.ts       # 自有后端 HTTP 适配器
 │   │
 │   ├── chat/
-│   │   ├── handler.ts                # 【Chat 层·入口】解包 vscode 请求，启动 Agent Loop
-│   │   ├── loop.ts                   # 【Chat 层·核心】Agent 循环引擎（多轮推理 + 工具调用）
-│   │   ├── context.ts                # 【Chat 层·上下文】ContextBuilder，维护多轮消息历史
-│   │   └── tools/
-│   │       └── registry.ts           # 【Chat 层·工具】工具声明列表 + 执行器
+│   │   └── workspace.ts              # 工作区上下文采集（git 状态、项目路径、memory 文件）
 │   │
-│   ├── llm/
-│   │   └── client.ts                 # 【LLM 层】选取模型，发送请求，返回响应流
+│   ├── compact/                      # 多层上下文压缩机制
+│   │   ├── CompactManager.ts         # 压缩调度器（Layer 3 自动压缩 + 响应式重试）
+│   │   ├── types.ts                  # 压缩相关类型定义
+│   │   ├── utils.ts                  # 工具函数
+│   │   └── layers/
+│   │       ├── autoCompact.ts        # Layer 3：token 感知自动压缩决策
+│   │       ├── micro.ts              # Layer 1：旧工具结果微压缩（占位替换）
+│   │       ├── reactive.ts           # 响应式：context_too_long 重试
+│   │       ├── retry.ts              # Layer 5：PTL 渐进截断重试
+│   │       ├── stripImages.ts        # Layer 2：摘要前剥离图像
+│   │       ├── summary.ts            # Layer 4：LLM 摘要
+│   │       └── truncate.ts           # 截断工具函数
+│   │
+│   ├── config/
+│   │   └── config.ts                 # 运行时配置（LLM 后端、压缩参数等）
+│   │
+│   ├── constants/
+│   │   └── prompts.ts                # System Prompt 构建（对齐 VS Code 系统工具）
 │   │
 │   └── shared/
-│       ├── constants.ts              # 跨层公共常量（AGENT_ID、MAX_LOOP_ROUNDS）
-│       └── logger.ts                 # 日志工具（Output Channel）
+│       ├── logger.ts                 # 日志工具（Output Channel）
+│       └── tokenEstimator.ts         # Token 估算工具（零依赖，中英混合友好）
 │
 ├── .vscode/
 │   ├── launch.json                   # F5 调试启动配置
@@ -154,80 +239,65 @@ modux-agent-provider/
 ├── package.json                      # VS Code 扩展清单 + npm 配置
 ├── vite.config.ts                    # Vite 构建配置（输出 CJS）
 ├── tsconfig.json                     # TypeScript 配置
-├── eslint.config.mjs                 # ESLint 规则
-├── .prettierrc                       # Prettier 格式化规则
-├── .editorconfig                     # 编辑器格式规范
-├── .gitignore
-├── LICENSE
-├── PLAN.md                           # 项目设计方案
 └── README.md                         # 本文件
 ```
-
-### 分层依赖关系
-
-```
-extension
-    └── provider          （唯一接触 vscode.chat API）
-            └── chat/handler
-                    └── chat/loop
-                            ├── chat/context
-                            ├── chat/tools/registry
-                            └── llm/client    （唯一接触 vscode.lm API）
-                                    └── shared（constants / logger）
-```
-
-依赖方向单向向下，各层职责：
-
-| 层                       | 职责                                                     |
-| ------------------------ | -------------------------------------------------------- |
-| `provider/`              | 注册 Chat Participant，绑定 handler                      |
-| `chat/handler.ts`        | 解包 vscode 原始请求，启动 loop                          |
-| `chat/loop.ts`           | Agent 循环引擎：LLM 调用 → 解析 Part → 工具执行 → 下一轮 |
-| `chat/context.ts`        | 构建、追加多轮消息历史（含工具调用结果）                 |
-| `chat/tools/registry.ts` | 声明工具列表 + 工具执行分发，添加工具只改此文件          |
-| `llm/client.ts`          | 选取 Copilot 模型，`sendRequest` 封装                    |
-| `shared/`                | 跨层常量与日志，无业务依赖                               |
 
 ---
 
 ## 核心原理
 
-### Chat Participant 注册
+### LM Provider 注册
 
-在 `package.json` 的 `contributes.chatParticipants` 中声明 Agent：
+在 `package.json` 的 `contributes.languageModelChatProviders` 中声明：
 
 ```json
 {
   "contributes": {
-    "chatParticipants": [
+    "languageModelChatProviders": [
       {
-        "id": "modux-agent.modux-agent",
-        "name": "modux-agent",
-        "description": "Modux Agent — 你的智能编码助手",
-        "isSticky": true
+        "vendor": "modux",
+        "name": "Modux Agent",
+        "description": "自定义 LLM 后端（DeepSeek / 自有服务）"
       }
     ]
   }
 }
 ```
 
-- **`id`**：扩展内唯一标识，格式为 `<publisher>.<name>`
-- **`name`**：用户在 Chat 中使用的 `@` 名称
-- **`isSticky`**：为 `true` 时，用户切换问题后 Agent 保持选中状态
+通过 `vscode.lm.registerLanguageModelChatProvider('modux', new LmProvider())` 注册。
+注册后，Copilot Chat 下拉框中出现以 `modux` 为 vendor 的模型条目。
 
 ### 消息处理流程
 
 ```
-用户输入 @modux-agent <message>
+用户在 Copilot Chat 选择 modux 模型 → 发送消息
     ↓
-VS Code 路由至 handler.ts
+VS Code 调用 LmProvider.provideLanguageModelChatResponse()
     ↓
-vscode.lm.selectChatModels() 获取 Copilot 模型
+跳过 messages[0]（Copilot 注入的 32-43K token 系统消息）
     ↓
-model.sendRequest() 发送消息
+注入我们自己的 system prompt（~2K token）+ 工作区上下文（git 状态等）
     ↓
-stream.markdown() 流式输出响应
+CompactManager.applyAutoCompact()（token 预算检查 + 必要时 LLM 摘要）
+    ↓
+CompactManager.wrapChat() → adapter.chat()（转发给 DeepSeek 或自有后端）
+    ↓
+流式返回 LanguageModelResponsePart（文字 / 工具调用 / 思考内容）
+    ↓
+VS Code 执行工具 → 再次调用 provideLanguageModelChatResponse（下一轮）
 ```
+
+### 工具调用
+
+工具（`options.tools`）由 VS Code/Copilot 提供（约 60 个系统工具），直接透传给后端 LLM，**不需要在扩展内自行实现**。工具执行由 VS Code 负责，扩展只负责转发工具调用结果。
+
+### 上下文压缩
+
+每次 `provideLanguageModelChatResponse` 被调用时，在转发前执行：
+
+1. **工具 token 补偿**：将 60+ 工具定义的约 25K token 纳入预算（这部分独立于 messages，但会占用上下文窗口）
+2. **Layer 3 自动压缩**：token 达到上下文窗口 75% 时，触发 LLM 对历史消息做摘要压缩
+3. **响应式兜底**：LLM 返回 context_too_long 错误时，自动压缩并重试
 
 ### Vite 构建配置要点
 
@@ -251,36 +321,27 @@ export default defineConfig({
 
 ## 开发脚本
 
-| 命令                   | 说明                   |
-| ---------------------- | ---------------------- |
-| `npm run dev`          | 监听模式构建           |
-| `npm run build`        | 生产构建               |
-| `npm run package`      | 构建并打包为 `.vsix`   |
-| `npm run lint`         | ESLint 检查            |
-| `npm run lint:fix`     | ESLint 自动修复        |
-| `npm run format`       | Prettier 格式化        |
-| `npm run format:check` | 检查格式化是否符合规范 |
+| 命令                    | 说明                   |
+| ----------------------- | ---------------------- |
+| `pnpm run dev`          | 监听模式构建           |
+| `pnpm run build`        | 生产构建               |
+| `pnpm run package`      | 构建并打包为 `.vsix`   |
+| `pnpm run lint`         | ESLint 检查            |
+| `pnpm run lint:fix`     | ESLint 自动修复        |
+| `pnpm run format`       | Prettier 格式化        |
+| `pnpm run format:check` | 检查格式化是否符合规范 |
 
 ---
 
 ## 常见问题排查
 
-| 现象                           | 原因                   | 解决方式                                                         |
-| ------------------------------ | ---------------------- | ---------------------------------------------------------------- |
-| Chat 中没有 `@modux-agent`     | 扩展未激活             | 确认宿主窗口已打开，查看 Output → modux-agent 是否有"已激活"日志 |
-| `@modux-agent` 出现但无响应    | Copilot 未登录或无权限 | 在宿主窗口确认 Copilot 扩展已安装并登录 GitHub 账号              |
-| 响应报错"未找到可用的语言模型" | 模型未授权             | 首次调用时 VS Code 会弹出授权弹窗，点击"允许"即可                |
-| 修改代码后 Agent 行为未变      | 未重载宿主窗口         | 宿主窗口按 `⌘R` / `Ctrl+R` 重载                                  |
-| F5 启动后宿主窗口一闪而过      | 构建报错导致加载失败   | 查看原始窗口"终端"面板中的 Vite 错误信息                         |
-
----
-
-## 扩展方向
-
-- **斜杠命令**：在 `package.json` 的 `commands` 字段添加 `/explain`、`/fix` 等命令
-- **后续问题建议**：在 handler 中调用 `stream.button()` 提供快捷操作
-- **自定义图标**：在 `chatParticipants` 中添加 `iconPath` 字段
-- **接入外部知识库**：在 handler 中调用自有 API，实现 RAG 增强
+| 现象                            | 原因                          | 解决方式                                                                 |
+| ------------------------------- | ----------------------------- | ------------------------------------------------------------------------ |
+| 下拉框中没有 modux 模型         | 扩展未激活                    | 确认宿主窗口已打开，查看 Output → modux-agent 是否有"已激活"日志         |
+| 选中模型后发送无响应            | Adapter 未配置或 API Key 错误 | 检查 config.ts 中 `llms` 是否有 `enabled: true` 条目，及 apiKey 是否正确 |
+| 响应报错"未启用任何 LLM 适配器" | 所有 llms 条目均为 false      | 将至少一个条目的 `enabled` 改为 `true`，重新构建                         |
+| 修改代码后行为未变              | 未重载宿主窗口                | 宿主窗口按 `⌘R` / `Ctrl+R` 重载                                          |
+| F5 启动后宿主窗口一闪而过       | 构建报错导致加载失败          | 查看原始窗口"终端"面板中的 Vite 错误信息                                 |
 
 ---
 

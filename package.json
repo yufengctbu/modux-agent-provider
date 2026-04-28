@@ -31,20 +31,6 @@
   ],
   "main": "./dist/extension.cjs",
   "contributes": {
-    "chatParticipants": [
-      {
-        "id": "modux-agent.modux-agent",
-        "name": "modux-agent",
-        "description": "Modux Agent — 你的智能编码助手",
-        "isSticky": true
-      },
-      {
-        "id": "modux-agent.modux-agent-deepseek",
-        "name": "modux-agent-deepseek",
-        "description": "Modux Agent DeepSeek — 由 DeepSeek 驱动的智能编码助手",
-        "isSticky": true
-      }
-    ],
     "languageModelChatProviders": [
       {
         "vendor": "modux",

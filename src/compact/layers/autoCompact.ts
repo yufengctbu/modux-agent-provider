@@ -1,8 +1,10 @@
 import * as vscode from 'vscode'
-import { estimateMessageTokens } from '../../shared/tokenEstimator'
+import { getTokenManager } from '../../token'
 import type { AutoCompactOptions, AutoCompactResult } from '../types'
 import { compactWithRetry } from './retry'
 import { truncateMessages } from './truncate'
+
+const tokenManager = getTokenManager()
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Layer 3 — Token 感知自动压缩（决策层）
@@ -36,12 +38,9 @@ const DEFAULT_CONTEXT_WINDOW = 32_000
  */
 export function estimateAllMessagesTokens(
   messages: ReadonlyArray<vscode.LanguageModelChatMessage>,
+  llmType?: string,
 ): number {
-  let total = 0
-  for (const msg of messages) {
-    total += estimateMessageTokens(msg as vscode.LanguageModelChatRequestMessage)
-  }
-  return total
+  return tokenManager.countMessages(llmType, messages)
 }
 
 /**
