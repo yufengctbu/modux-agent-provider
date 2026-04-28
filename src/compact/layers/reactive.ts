@@ -39,7 +39,6 @@ export async function* withReactiveCompact(
   opts: ReactiveCompactOptions,
 ): AsyncIterable<vscode.LanguageModelResponsePart> {
   if (!opts.enabled) {
-    log('[Compact][Reactive] 已关闭，直连 chatFn')
     yield* chatFn(messages)
     return
   }
@@ -53,17 +52,13 @@ export async function* withReactiveCompact(
 
   while (true) {
     try {
-      log(`[Compact][Reactive] 尝试请求，attempt=${retries + 1}`)
       yield* chatFn(currentMessages)
-      log(`[Compact][Reactive] 请求成功，attempt=${retries + 1}`)
       return
     } catch (err) {
       if (!isContextTooLongError(err) || retries >= maxRetries) throw err
 
       retries++
-      log(`[Compact][Reactive] 命中 context 过长，执行压缩重试（第 ${retries} 次）`)
       const history = getHistoryMessages()
-      const beforeHistoryTokens = estimateMessagesTokens(history, llmType)
       const retryResult = await compactWithRetry(history, {
         ...opts.compactOpts,
         maxRetries: opts.compactOpts.maxPtlRetries,
@@ -72,14 +67,9 @@ export async function* withReactiveCompact(
 
       replaceHistoryMessages(retryResult.messages)
       const newHistory = retryResult.messages
-      const afterHistoryTokens = estimateMessagesTokens(newHistory, llmType)
+      const afterTokens = estimateMessagesTokens(newHistory, llmType)
+      log(`[Compact] Reactive（响应式压缩）→ ${afterTokens.toLocaleString()} tokens`)
       currentMessages = buildFallbackMessages(currentMessages, prefixCount, newHistory)
-      log(
-        `[Compact][Reactive] 重试准备完成：usedLlmSummary=${retryResult.usedLlmSummary}，retries=${retryResult.retries}，history=${newHistory.length}`,
-      )
-      log(
-        `[Compact][Reactive] 压缩对比：history ${history.length} -> ${newHistory.length}，tokens ${beforeHistoryTokens.toLocaleString()} -> ${afterHistoryTokens.toLocaleString()}`,
-      )
     }
   }
 }

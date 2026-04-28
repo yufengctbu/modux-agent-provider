@@ -343,10 +343,7 @@ class DeepSeekAdapter implements LlmAdapter {
         : {}),
     })
 
-    log(
-      `[DeepSeek Adapter] 发起请求：model=${this.cfg.model}，messages=${messages.length}，thinking=${thinkingType}` +
-        (placeholderInjected ? '，部分历史 reasoning_content 缺失，已注入占位符兜底' : ''),
-    )
+    log(`[DeepSeek] model=${this.cfg.model}, type=${this.type}`)
 
     let incoming: http.IncomingMessage
     let destroyRequest: () => void
@@ -390,7 +387,6 @@ class DeepSeekAdapter implements LlmAdapter {
         // arguments 解析失败时传空对象，让工具侧报错而非崩溃
         input = {}
       }
-      log(`[DeepSeek Adapter] 工具调用：${tc.name}（callId=${tc.id}）`)
       yield new vscode.LanguageModelToolCallPart(tc.id, tc.name, (input ?? {}) as object)
     }
 
@@ -410,9 +406,6 @@ class DeepSeekAdapter implements LlmAdapter {
         if (oldestKey !== undefined) this.reasoningCache.delete(oldestKey)
       }
       this.reasoningCache.set(fingerprint, reasoningOut.content)
-      if (reasoningOut.content) {
-        log(`[DeepSeek Adapter] 缓存 reasoning_content，长度=${reasoningOut.content.length}`)
-      }
     }
   }
 
@@ -538,14 +531,7 @@ class DeepSeekAdapter implements LlmAdapter {
 
           // KV 缓存命中统计（DeepSeek 在最后一个 chunk 中返回 usage）
           if (sseChunk.usage) {
-            const hit = sseChunk.usage.prompt_cache_hit_tokens ?? 0
-            const miss = sseChunk.usage.prompt_cache_miss_tokens ?? 0
-            const total = hit + miss
-            const hitRate = total > 0 ? Math.round((hit / total) * 100) : 0
-            log(
-              `[DeepSeek Adapter] KV缓存：命中 ${hit} tokens，未命中 ${miss} tokens` +
-                (total > 0 ? `，命中率 ${hitRate}%（输入共 ${total} tokens）` : ''),
-            )
+            // usage 已处理，无需日志
           }
 
           const delta = sseChunk.choices?.[0]?.delta

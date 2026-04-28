@@ -121,7 +121,7 @@ class ModuxBackendAdapter implements LlmAdapter {
       }
     }
 
-    log(`[Backend Adapter] 转发至：${this.cfg.url}`)
+    log(`[ModuxBackend] model=modux-agent, type=${this.type}`)
 
     let res: Response
     try {
@@ -164,7 +164,6 @@ class ModuxBackendAdapter implements LlmAdapter {
    */
   private async *readSseStream(res: Response, signal: AbortSignal): AsyncIterable<string> {
     if (!res.body) {
-      log('[Backend Adapter] SSE 响应体为空')
       return
     }
 

@@ -45,20 +45,6 @@ export interface CompactContextBuilder {
 }
 
 /**
- * 单次压缩阶段的统计快照。
- *
- * 说明：
- * - messageTokens：仅 messages 本体估算 token
- * - effectiveTokens：messageTokens + extraTokens（含 tools 开销）
- */
-interface CompactStats {
-  readonly totalMessages: number
-  readonly historyMessages: number
-  readonly messageTokens: number
-  readonly effectiveTokens: number
-}
-
-/**
  * 上下文压缩外观类。
  *
  * 每轮 Agent 循环对应一个 CompactManager 实例，跨轮持久化失败计数。
@@ -67,9 +53,6 @@ interface CompactStats {
 export class CompactManager {
   /** autoCompact 连续失败次数（熔断计数器） */
   private autoCompactFailureCount = 0
-
-  /** 本实例内请求计数，用于日志定位每轮调用 */
-  private applySeq = 0
 
   /** 压缩专用 LLM Adapter（来自 config.compact.llm，或回退到主 Adapter） */
   private readonly compactAdapter: LlmAdapter
@@ -89,34 +72,6 @@ export class CompactManager {
       timeoutMs: config.compact.timeoutMs,
       maxPtlRetries: config.compact.maxPtlRetries,
     }
-  }
-
-  // ── 指标与日志模块 ──────────────────────────────────────────────────────────
-
-  /** 采集某一时刻消息快照指标，供日志对比复用。 */
-  private collectStats(
-    messages: ReadonlyArray<vscode.LanguageModelChatMessage>,
-    extraTokens = 0,
-  ): CompactStats {
-    const totalMessages = messages.length
-    const historyMessages = Math.max(0, totalMessages - this.ctx.prefixCount)
-    const messageTokens = estimateAllMessagesTokens(messages, this.mainAdapter.type)
-    return {
-      totalMessages,
-      historyMessages,
-      messageTokens,
-      effectiveTokens: messageTokens + extraTokens,
-    }
-  }
-
-  /** 格式化压缩前后对比，避免日志字符串拼接散落在主流程中。 */
-  private formatStatsCompare(before: CompactStats, after: CompactStats): string {
-    return (
-      `messages ${before.totalMessages} -> ${after.totalMessages}, ` +
-      `history ${before.historyMessages} -> ${after.historyMessages}, ` +
-      `msgTokens ${before.messageTokens.toLocaleString()} -> ${after.messageTokens.toLocaleString()}, ` +
-      `effectiveTokens ${before.effectiveTokens.toLocaleString()} -> ${after.effectiveTokens.toLocaleString()}`
-    )
   }
 
   // ── 公开接口 ─────────────────────────────────────────────────────────────────
@@ -142,17 +97,7 @@ export class CompactManager {
     /** 即将触发 LLM 摘要压缩前的回调，可用于向用户展示"正在压缩对话"提示 */
     onWillCompact?: () => void,
   ): Promise<vscode.LanguageModelChatMessage[]> {
-    this.applySeq++
-    const applyId = this.applySeq
-
-    // ── Stage 0：入口快照 ────────────────────────────────────────────────────
-    const startStats = this.collectStats(messages, extraTokens)
-    log(
-      `[Compact#${applyId}] 开始：总消息=${startStats.totalMessages}，历史=${startStats.historyMessages}，msgTokens=${startStats.messageTokens.toLocaleString()}，effectiveTokens=${startStats.effectiveTokens.toLocaleString()}（extra=${extraTokens}）`,
-    )
-
     // ── Stage 1：Layer1 微压缩 ───────────────────────────────────────────────
-    // Layer 1：微压缩（每轮都执行，首轮一般为 no-op，但不会跳过流程）
     const microResult = applyMicrocompaction(
       messages,
       {
@@ -164,28 +109,21 @@ export class CompactManager {
     )
 
     const afterMicro = microResult.messages
-    const microStats = this.collectStats(afterMicro, extraTokens)
-    log(
-      `[Compact#${applyId}] Layer1 微压缩：replaced=${microResult.replacedCount}（structured=${microResult.structuredReplacedCount}），savedChars≈${microResult.savedChars}`,
-    )
-    log(`[Compact#${applyId}] Layer1 对比：${this.formatStatsCompare(startStats, microStats)}`)
+    if (microResult.replacedCount > 0) {
+      const microTokens = estimateAllMessagesTokens(afterMicro, this.mainAdapter.type) + extraTokens
+      log(`[Compact] Layer1（微压缩）→ ${microTokens.toLocaleString()} tokens`)
+    }
 
     // Stage 2 开关：禁用自动摘要时，保留 Layer1 输出即可
     if (!config.agent.compactHistoryEnabled || !config.compact.autoEnabled) {
-      log(`[Compact#${applyId}] Layer3 关闭，跳过自动摘要，仅输出 Layer1 结果`)
       return afterMicro
     }
 
     // ── Stage 2：Layer3 自动压缩决策（必要时触发 Layer5+Layer4）────────────
     const contextWindowSize = (this.mainAdapter as { contextWindowSize?: number }).contextWindowSize
     const window = contextWindowSize ?? 32_000
-    // 复用 Stage1 已计算的 token，避免重复估算造成额外 CPU 开销。
-    const tokenEstimate = microStats.effectiveTokens
+    const tokenEstimate = estimateAllMessagesTokens(afterMicro, this.mainAdapter.type) + extraTokens
     const softThreshold = window * config.compact.autoThresholdRatio
-
-    log(
-      `[Compact#${applyId}] Layer3 token 预算：${tokenEstimate.toLocaleString()} / ${window.toLocaleString()}`,
-    )
 
     // 若达到软阈值，即将触发 LLM 摘要，提前通知外层显示 UI 提示
     if (tokenEstimate >= softThreshold) {
@@ -205,31 +143,23 @@ export class CompactManager {
     })
 
     if (autoResult.compacted) {
-      const autoStats = this.collectStats(autoResult.messages, extraTokens)
-      log(`[Compact#${applyId}] Layer3/5 LLM 摘要成功，重置熔断计数`)
-      log(`[Compact#${applyId}] Layer3/5 对比：${this.formatStatsCompare(microStats, autoStats)}`)
+      const afterTokens =
+        estimateAllMessagesTokens(autoResult.messages, this.mainAdapter.type) + extraTokens
+      log(`[Compact] Layer3/5（LLM摘要）→ ${afterTokens.toLocaleString()} tokens`)
       this.ctx.replaceHistoryMessages(autoResult.messages.slice(this.ctx.prefixCount))
       this.autoCompactFailureCount = 0
       return autoResult.messages
     }
 
     if (autoResult.compactFailed) {
-      const autoStats = this.collectStats(autoResult.messages, extraTokens)
+      const afterTokens =
+        estimateAllMessagesTokens(autoResult.messages, this.mainAdapter.type) + extraTokens
+      log(`[Compact] Layer3/5（截断降级）→ ${afterTokens.toLocaleString()} tokens`)
       this.autoCompactFailureCount++
-      log(
-        `[Compact#${applyId}] Layer3/5 摘要失败（已降级截断），累计失败 ${this.autoCompactFailureCount} 次`,
-      )
-      log(`[Compact#${applyId}] Layer3/5 对比：${this.formatStatsCompare(microStats, autoStats)}`)
       this.ctx.replaceHistoryMessages(autoResult.messages.slice(this.ctx.prefixCount))
       return autoResult.messages
     }
 
-    if (tokenEstimate >= softThreshold) {
-      const autoStats = this.collectStats(autoResult.messages, extraTokens)
-      log(`[Compact#${applyId}] Layer3 对比：${this.formatStatsCompare(microStats, autoStats)}`)
-    }
-
-    log(`[Compact#${applyId}] Layer3 判定无需摘要压缩`)
     return afterMicro
   }
 
@@ -248,9 +178,6 @@ export class CompactManager {
     ) => AsyncIterable<vscode.LanguageModelResponsePart>,
     messages: readonly vscode.LanguageModelChatMessage[],
   ): AsyncIterable<vscode.LanguageModelResponsePart> {
-    log(
-      `[Compact] Reactive 包裹启用=${config.compact.reactiveEnabled}，maxRetries=${config.compact.reactiveMaxRetries}`,
-    )
     return withReactiveCompact(chatFn, messages, {
       enabled: config.compact.reactiveEnabled,
       maxRetries: config.compact.reactiveMaxRetries,
